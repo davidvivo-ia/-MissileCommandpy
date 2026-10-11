@@ -30,6 +30,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from enum import Enum, auto
+from itertools import pairwise
 from pathlib import Path
 
 os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
@@ -38,7 +39,7 @@ try:
 except ImportError:  # --test y --headless funcionan sin pygame
     pygame = None
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 # =============================================================================
 # Constantes y tablas del original
@@ -182,6 +183,7 @@ DEFAULT_SCORES = (
     ("RAD", 6000),
     ("DEF", 5500),
 )
+AMMO_MODES = ("arcade", "infinite")  # cada modo de munición tiene su tabla de récords
 INITIALS_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ "
 
 # =============================================================================
@@ -423,6 +425,15 @@ def build_terrain() -> tuple[int, ...]:
 TERRAIN = build_terrain()
 
 
+def clean_table(rows) -> list[tuple[str, int]]:
+    """Cinco récords ordenados; si no hay datos válidos, los de fábrica."""
+    try:
+        table = [(str(n)[:3].upper(), int(s)) for n, s in rows or ()]
+    except (TypeError, ValueError):
+        table = []
+    return sorted(table or DEFAULT_SCORES, key=lambda e: -e[1])[:5]
+
+
 def icbm_clock(clock: int, delay: int) -> tuple[int, bool]:
     """Temporizador 8.8 de UPICBM: devuelve el nuevo reloj y si los ICBM avanzan."""
     if clock >= 0x100:
@@ -636,8 +647,9 @@ class Game:
         cities: int = 6,
         bonus: int = 10000,
         start_wave: int = 1,
-        scores: list[tuple[str, int]] | None = None,
+        scores: dict | list | None = None,
         stats_screen: bool = True,
+        infinite_ammo: bool = False,
     ) -> None:
         self.seed = seed
         self.rng = random.Random(seed)
@@ -646,8 +658,10 @@ class Game:
         self.bonus_every = max(0, bonus)
         self.start_wave = max(1, start_wave)
         self.stats_screen = stats_screen
-        table = [(str(n)[:3].upper(), int(s)) for n, s in (scores or DEFAULT_SCORES)]
-        self.high_scores = sorted(table, key=lambda e: -e[1])[:5]
+        source = scores if isinstance(scores, dict) else {"arcade": scores}
+        self.tables = {mode: clean_table(source.get(mode)) for mode in AMMO_MODES}
+        self.infinite = infinite_ammo
+        self.high_scores = self.tables[self.ammo_mode]
         self.scores_changed = False
         self.new_rank = -1
         self.fx: list[FX] = []
@@ -677,6 +691,16 @@ class Game:
         self._start_title()
 
     # --- arranque y fases -----------------------------------------------------
+
+    @property
+    def ammo_mode(self) -> str:
+        return "infinite" if self.infinite else "arcade"
+
+    def set_infinite(self, on: bool) -> None:
+        """Munición infinita o la del original; cada modo con su tabla de récords."""
+        self.infinite = on
+        self.high_scores = self.tables[self.ammo_mode]
+        self.new_rank = -1
 
     def _reset_player(self) -> None:
         self.score = 0
@@ -965,12 +989,12 @@ class Game:
         m.silo, m.serial, m.chain = i, self.serial, self.chain_seq
         m.aim()
         self.abms.append(m)
-        silo.abms -= 1
+        if not self.infinite:
+            silo.abms -= 1
         if not self.attract:
             self.stats.shots += 1
-        self.fx.append(
-            FX("low" if silo.abms == 3 else "abm", silo.x, SILO_TOP, silo.abms)
-        )
+        low = silo.abms == 3 and not self.infinite
+        self.fx.append(FX("low" if low else "abm", silo.x, SILO_TOP, silo.abms))
 
     def _update_abms(self) -> None:
         """UPABMS: 3 pasos por frame en los laterales, 7 en el central."""
@@ -1368,7 +1392,9 @@ class Game:
         mult = multiplier(self.wave)
         if t.stage == 0:
             for s in reversed(self.silos):
-                if s.abms:
+                if (
+                    s.abms and not self.infinite
+                ):  # con munición infinita no hay sobrantes
                     s.abms -= 1
                     t.abms += 1
                     t.abm_points += BONUS_ABM * mult
@@ -1490,7 +1516,7 @@ class Game:
         mine = (name, self.players[self.entry_player].score)
         table = sorted(self.high_scores + [mine], key=lambda e: -e[1])[:5]
         self.new_rank = next((i for i, e in enumerate(table) if e is mine), -1)
-        self.high_scores = table
+        self.high_scores = self.tables[self.ammo_mode] = table
         self.scores_changed = True
         self._check_high_score()
 
@@ -1608,9 +1634,12 @@ def simulate(
     frames: int = 60 * 60 * 90,
     cities: int = 6,
     bonus: int = 10000,
+    infinite: bool = False,
 ) -> Game:
     """Una partida completa con el piloto hábil, sin pygame."""
-    g = Game(seed, cities, bonus, start_wave, stats_screen=False)
+    g = Game(
+        seed, cities, bonus, start_wave, stats_screen=False, infinite_ammo=infinite
+    )
     g.start_game()
     pilot = Autopilot(skilled=True)
     while g.frame < frames and g.phase is not Phase.THE_END:
@@ -1621,13 +1650,15 @@ def simulate(
 
 def run_headless(args: argparse.Namespace) -> int:
     started = time.perf_counter()
-    g = simulate(args.seed, args.wave, args.frames, args.cities, args.bonus)
+    infinite = args.ammo == "infinite"  # sin --ammo, la munición del original
+    g = simulate(args.seed, args.wave, args.frames, args.cities, args.bonus, infinite)
     elapsed = time.perf_counter() - started
     s = g.stats
     minutes, seconds = divmod(g.frame // FPS, 60)
     over = "sí" if g.phase is Phase.THE_END else "no, se agotó el tiempo"
     print(f"missile.py {__version__}, partida simulada con semilla {args.seed}")
     print(f"  fin de partida:       {over}")
+    print(f"  munición:             {'infinita' if infinite else 'la del original'}")
     print(f"  oleada alcanzada:     {g.wave}")
     print(f"  oleadas superadas:    {s.waves}")
     print(f"  puntuación:           {g.score}")
@@ -1811,20 +1842,45 @@ def self_test() -> int:
         import tempfile
 
         with tempfile.TemporaryDirectory() as tmp:
-            scores = ScoreStore(True, Path(tmp) / "scores.json")
-            scores.save([("ABC", 1234), ("XYZ", 99)])
-            settings = SettingsStore(True, Path(tmp) / "settings.json")
-            settings.set(filter="glow", effects=False)
-            reread = SettingsStore(True, Path(tmp) / "settings.json")
-            ok = scores.load() == [("ABC", 1234), ("XYZ", 99)]
-            ok = (
-                ok
-                and reread.get("filter", "crt") == "glow"
-                and reread.get("effects", True) is False
+            old = Path(tmp) / "v1.json"
+            old.write_text(
+                json.dumps({"version": 1, "scores": [["OLD", 42]]}), encoding="utf-8"
             )
-            return ok and reread.get(
-                "lang", "auto"
-            ) == "auto", "récords y ajustes ida y vuelta"
+            legacy = ScoreStore(True, old).load() == {"arcade": [("OLD", 42)]}
+            scores = ScoreStore(True, Path(tmp) / "scores.json")
+            tables = {"arcade": [("ABC", 1234), ("XYZ", 99)], "infinite": [("INF", 5)]}
+            scores.save(tables)
+            settings = SettingsStore(True, Path(tmp) / "settings.json")
+            settings.set(style="retro", effects=False)
+            reread = SettingsStore(True, Path(tmp) / "settings.json")
+            ok = legacy and scores.load() == tables
+            ok = ok and reread.get("style", "hd") == "retro"
+            ok = ok and reread.get("effects", True) is False
+            ok = ok and reread.get("lang", "auto") == "auto"
+            return ok, "récords v1 y v2, y ajustes"
+
+    def infinite_ammo():
+        g = Game(seed=4, stats_screen=False, infinite_ammo=True)
+        g.start_game()
+        pilot, lowest, abm_bonus = Autopilot(skilled=True), ABMS_PER_SILO, 0
+        while g.frame < 60 * 60 * 30 and g.phase is not Phase.THE_END:
+            g.step(pilot.inputs(g))
+            g.fx.clear()
+            lowest = min([lowest] + [s.abms for s in g.silos if s.alive])
+            if g.tally is not None:
+                abm_bonus = max(abm_bonus, g.tally.abm_points)
+        g.set_infinite(False)
+        separate = g.high_scores is g.tables["arcade"]
+        ok = (
+            lowest == ABMS_PER_SILO
+            and abm_bonus == 0
+            and g.stats.shots > 300
+            and separate
+        )
+        return (
+            ok,
+            f"munición mínima {lowest}, {g.stats.shots} disparos, oleada {g.wave}",
+        )
 
     check("tablas del original completas", tables)
     check("multiplicador por oleada", multipliers)
@@ -1844,6 +1900,7 @@ def self_test() -> int:
     check("ningún texto se sale de la pantalla", text_widths)
     check("dos jugadores: turnos alternos y final", two_players)
     check("récords y ajustes en disco", storage)
+    check("munición infinita: silos llenos y su propia tabla", infinite_ammo)
     width = max(len(name) for name, _, _ in results)
     for name, ok, detail in results:
         print(f"{'OK   ' if ok else 'FALLO'}  {name:<{width}}  {detail}")
@@ -1878,9 +1935,11 @@ TEXTS: dict[str, tuple[str, str]] = {
     "chain": ("CHAIN {n}", "CADENA {n}"),
     "report": ("MISSION REPORT", "INFORME DE MISIÓN"),
     "press_fire": ("PRESS FIRE", "PULSA DISPARO"),
-    "filter_crt": ("CRT FILTER", "FILTRO CRT"),
-    "filter_glow": ("GLOW ONLY", "SOLO BRILLO"),
-    "filter_off": ("NO FILTER", "SIN FILTRO"),
+    "style_hd": ("HD GRAPHICS", "GRÁFICOS HD"),
+    "style_retro": ("RETRO CRT", "RETRO CRT"),
+    "style_arcade": ("ARCADE PIXELS", "PÍXELES ARCADE"),
+    "inf_on": ("INFINITE AMMO", "MUNICIÓN INFINITA"),
+    "inf_off": ("LIMITED AMMO", "MUNICIÓN LIMITADA"),
     "fx_on": ("EFFECTS ON", "EFECTOS SÍ"),
     "fx_off": ("EFFECTS OFF", "EFECTOS NO"),
     "sound_on": ("SOUND ON", "SONIDO SÍ"),
@@ -1894,7 +1953,7 @@ TEXTS: dict[str, tuple[str, str]] = {
     "st_shots": ("ABMS FIRED", "ABM DISPARADOS"),
     "st_kills": ("ENEMIES DOWN", "DERRIBOS"),
     "st_icbms": ("  ICBMS", "  ICBM"),
-    "st_smarts": ("  SMART BOMBS", "  SMART BOMBS"),
+    "st_smarts": ("  SMART BOMBS", "  BOMBAS INTELIGENTES"),
     "st_fliers": ("  FLIERS", "  VOLADORES"),
     "st_chain": ("BEST CHAIN", "MEJOR CADENA"),
     "st_mirvs": ("MIRVS SPLIT", "MIRV DIVIDIDOS"),
@@ -1903,26 +1962,35 @@ TEXTS: dict[str, tuple[str, str]] = {
     "st_ratio": ("KILLS PER ABM", "DERRIBOS POR ABM"),
     "st_time": ("TIME", "TIEMPO"),
 }
-PAUSE_LINES = {
-    "en": ("PAUSED", "", "P    RESUME", "ESC  QUIT", "F1   HELP"),
-    "es": ("PAUSA", "", "P    SEGUIR", "ESC  SALIR", "F1   AYUDA"),
-}
-HELP_LINES = {
-    "en": (
-        "CONTROLS", "", "MOUSE     AIM", "L M R     FIRE", "Z X C     FIRE",
-        "ARROWS    AIM", "SHIFT     FINE AIM", "PAD       STICK, X A B",
-        "1  2      ONE OR TWO PLAYERS", "P  ESC    PAUSE", "F2        CRT FILTER",
-        "F3        EFFECTS", "F11       FULLSCREEN", "F12       SCREENSHOT",
-        "M         SOUND", "T         TRACKBALL", "L         LANGUAGE",
-    ),
-    "es": (
-        "CONTROLES", "", "RATÓN     APUNTAR", "I C D     DISPARAR", "Z X C     DISPARAR",
-        "FLECHAS   APUNTAR", "MAYÚS     PRECISIÓN", "MANDO     STICK, X A B",
-        "1  2      UNO O DOS JUGADORES", "P  ESC    PAUSA", "F2        FILTRO CRT",
-        "F3        EFECTOS", "F11       PANTALLA COMPLETA", "F12       CAPTURA",
-        "M         SONIDO", "T         TRACKBALL", "L         IDIOMA",
-    ),
+HELP_ROWS = {
+    "en": ("CONTROLS", (
+        ("MOUSE", "AIM"), ("L M R", "FIRE"), ("Z X C", "FIRE"), ("ARROWS", "AIM"),
+        ("SHIFT", "FINE AIM"), ("PAD", "STICK, X A B"), ("1  2", "ONE OR TWO PLAYERS"),
+        ("I", "INFINITE AMMO"), ("P  ESC", "PAUSE"), ("F2  F3", "STYLE  EFFECTS"),
+        ("F11  F12", "FULLSCREEN  SHOT"), ("M  T  L", "SOUND MOUSE LANG"),
+    )),
+    "es": ("CONTROLES", (
+        ("RATÓN", "APUNTAR"), ("BOTONES", "DISPARAR"), ("Z X C", "DISPARAR"),
+        ("FLECHAS", "APUNTAR"), ("MAYÚS", "PRECISIÓN"), ("MANDO", "STICK, X A B"),
+        ("1  2", "UNO O DOS JUGADORES"), ("I", "MUNICIÓN INFINITA"), ("P  ESC", "PAUSA"),
+        ("F2  F3", "ESTILO  EFECTOS"), ("F11  F12", "PANTALLA  CAPTURA"),
+        ("M  T  L", "SONIDO RATÓN IDIOMA"),
+    )),
 }  # fmt: skip
+PAUSE_ROWS = {
+    "en": ("PAUSED", (("P", "RESUME"), ("ESC", "QUIT"), ("F1", "HELP"))),
+    "es": ("PAUSA", (("P", "SEGUIR"), ("ESC", "SALIR"), ("F1", "AYUDA"))),
+}
+
+
+def box_lines(rows) -> tuple[str, ...]:
+    """Las filas (tecla, acción) en líneas de ancho fijo para la fuente de píxel."""
+    title, items = rows
+    return (title, "") + tuple(f"{key:<10}{action}" for key, action in items)
+
+
+HELP_LINES = {lang: box_lines(rows) for lang, rows in HELP_ROWS.items()}
+PAUSE_LINES = {lang: box_lines(rows) for lang, rows in PAUSE_ROWS.items()}
 LANGS = ("en", "es")
 
 
@@ -2007,24 +2075,23 @@ class Palette:
     dark: bool
 
 
-class Renderer:
-    """Dibuja la partida en 256 x 231, como el hardware, y la compone a la escala
-    de la ventana con el filtro elegido."""
+class PixelRenderer:
+    """Estilos retro y arcade: dibuja la partida en 256 x 231, como el hardware,
+    y la amplía al mayor múltiplo entero que quepa en la ventana."""
 
     FILTERS = ("crt", "glow", "off")
 
-    def __init__(
-        self, scale: int, fx: str = "crt", juice: bool = True, lang: str = "en"
-    ) -> None:
-        self.k = max(1, scale)
+    def __init__(self, fx: str = "crt", juice: bool = True, lang: str = "en") -> None:
+        self.k = 0
+        self.rect = pygame.Rect(0, 0, W, H)
         self.fx_mode = fx if fx in self.FILTERS else "crt"
         self.juice = juice
         self.lang = lang if lang in LANGS else "en"
         self.logical = pygame.Surface((W, H))
         self.glow = pygame.Surface((W, H))
         self.smoke_layer = pygame.Surface((W, H), pygame.SRCALPHA)
-        self.hi = pygame.Surface((W * self.k, H * self.k))
-        self.mask = self._crt_mask()
+        self.hi = None
+        self.mask = None
         self._blur = getattr(pygame.transform, "gaussian_blur", None)
         self._glyphs: dict = {}
         self._sprites: dict = {}
@@ -2177,10 +2244,26 @@ class Renderer:
     def say(self, key: str) -> None:
         self.toast, self.toast_frames = key, 100
 
-    def cycle_filter(self) -> None:
-        i = self.FILTERS.index(self.fx_mode)
-        self.fx_mode = self.FILTERS[(i + 1) % len(self.FILTERS)]
-        self.say(f"filter_{self.fx_mode}")
+    @property
+    def style(self) -> str:
+        return "retro" if self.fx_mode != "off" else "arcade"
+
+    def _fit(self, size) -> None:
+        sw, sh = size
+        k = max(1, min(sw // W, sh // H))
+        if k != self.k:
+            self.k = k
+            self.hi = pygame.Surface((W * k, H * k))
+            self.mask = self._crt_mask()
+        self.rect = pygame.Rect((sw - W * k) // 2, (sh - H * k) // 2, W * k, H * k)
+
+    def to_game(self, pos) -> tuple[float, float]:
+        k = max(1, self.k)
+        return ((pos[0] - self.rect.x) / k, Y_MAX - (pos[1] - self.rect.y) / k)
+
+    @property
+    def unit(self) -> float:
+        return float(max(1, self.k))
 
     def set_juice(self, on: bool) -> None:
         self.juice = on
@@ -2307,7 +2390,8 @@ class Renderer:
 
     # --- dibujo -------------------------------------------------------------------
 
-    def draw(self, g: Game, overlay: str | None = None) -> None:
+    def draw(self, g: Game, screen, overlay: str | None = None) -> None:
+        self._fit(screen.get_size())
         menu = g.phase in (Phase.TITLE, Phase.SCORES, Phase.INITIALS, Phase.STATS)
         names = wave_colors(1 if menu else g.wave)
         bg, terrain, icbm, city, abm = (self.rgb(n) for n in names)
@@ -2333,6 +2417,7 @@ class Renderer:
             table = HELP_LINES if overlay == "help" else PAUSE_LINES
             self._draw_box(table[self.lang], p)
         self._compose()
+        self._present(screen)
 
     def _draw_field(self, g: Game, p: Palette) -> None:
         L = self.logical
@@ -2711,17 +2796,16 @@ class Renderer:
                 special_flags=pygame.BLEND_ADD,
             )
 
-    def present(self, screen) -> None:
+    def _present(self, screen) -> None:
         ox = oy = 0
         if self.juice and self.shake > 0.3:
             ox = round(self.rng.uniform(-self.shake, self.shake) * self.k)
             oy = round(self.rng.uniform(-self.shake, self.shake) * self.k)
-            screen.fill((0, 0, 0))
-        screen.blit(self.hi, (ox, oy))
+        screen.fill((0, 0, 0))
+        screen.blit(self.hi, (self.rect.x + ox, self.rect.y + oy))
         if self.juice and self.flash > 0.02:
-            screen.fill(
-                scaled(self.flash_rgb, self.flash), special_flags=pygame.BLEND_ADD
-            )
+            color = scaled(self.flash_rgb, self.flash)
+            screen.fill(color, self.rect, special_flags=pygame.BLEND_ADD)
 
 
 def make_icon():
@@ -2731,6 +2815,2181 @@ def make_icon():
             icon, color, [(16 + x, 16 - y) for x, y in octagon(0, 0, r)]
         )
     return icon
+
+
+# =============================================================================
+# Render HD: alta resolución, luz suave y nada de píxeles a la vista
+# =============================================================================
+
+HD_MAX_HEIGHT = 1080  # el campo se dibuja como mucho a esta altura y luego se escala
+HD_PANEL_MIN = 150  # ancho mínimo para mostrar los paneles laterales
+HD_MOON = (233, 204)  # arriba a la derecha, lejos de los títulos; ilumina desde ahí
+
+# Cielo y suelo por pareja de oleadas: los cambios de color del original, de noche
+HD_SKIES = (
+    ((5, 8, 22), (38, 32, 70)),
+    ((4, 13, 20), (20, 54, 64)),
+    ((12, 6, 26), (58, 30, 74)),
+    ((16, 6, 12), (78, 32, 36)),
+    ((6, 12, 28), (34, 58, 96)),
+    ((4, 16, 15), (24, 64, 52)),
+    ((16, 5, 19), (78, 26, 72)),
+    ((14, 10, 7), (94, 62, 28)),
+    ((13, 15, 22), (74, 78, 92)),
+    ((15, 4, 5), (98, 30, 22)),
+)
+HD_GROUND = (
+    ((96, 80, 48), (24, 19, 14)),
+    ((88, 82, 50), (21, 21, 14)),
+    ((56, 70, 104), (11, 15, 27)),
+    ((110, 54, 44), (27, 12, 10)),
+    ((100, 84, 50), (27, 21, 12)),
+    ((92, 86, 58), (23, 21, 14)),
+    ((52, 92, 62), (10, 23, 14)),
+    ((66, 96, 56), (13, 23, 10)),
+    ((112, 52, 52), (29, 12, 12)),
+    ((108, 90, 52), (29, 21, 10)),
+)
+HD_ENEMY = {
+    "red": (255, 106, 74),
+    "green": (132, 236, 112),
+    "yellow": (255, 206, 94),
+    "magenta": (232, 108, 240),
+    "black": (214, 218, 234),
+}
+HD_PLAYER = (112, 214, 255)
+HD_TEXT = (236, 234, 228)
+HD_MUTED = (140, 150, 172)
+HD_WARM = (255, 190, 116)
+HD_DANGER = (255, 112, 92)
+FIRE_STOPS = (
+    (
+        (0.0, (255, 244, 220, 255)),
+        (0.2, (255, 218, 150, 250)),
+        (0.48, (255, 150, 64, 236)),
+        (0.74, (226, 82, 36, 196)),
+        (0.92, (150, 40, 24, 96)),
+        (1.0, (96, 26, 18, 0)),
+    ),
+    (
+        (0.0, (255, 206, 132, 246)),
+        (0.3, (252, 152, 70, 232)),
+        (0.62, (214, 82, 40, 196)),
+        (0.86, (124, 42, 30, 104)),
+        (1.0, (70, 32, 26, 0)),
+    ),
+    (
+        (0.0, (206, 112, 66, 206)),
+        (0.38, (152, 70, 46, 170)),
+        (0.72, (90, 54, 50, 112)),
+        (1.0, (56, 50, 54, 0)),
+    ),
+)
+SPARK_RAMP = (
+    (0.0, (255, 246, 214)),
+    (0.35, (255, 196, 96)),
+    (0.7, (240, 110, 40)),
+    (1.0, (120, 40, 24)),
+)
+SMOKE_STOPS = (
+    (0.0, (98, 98, 110, 150)),
+    (0.55, (82, 82, 94, 90)),
+    (1.0, (74, 74, 84, 0)),
+)
+
+# Textos que solo usa el render HD: su fuente sí tiene el signo ×
+HD_TEXTS: dict[str, tuple[str, str]] = {
+    "score": ("SCORE", "PUNTOS"),
+    "hi": ("HIGH SCORE", "RÉCORD"),
+    "wave_label": ("WAVE", "OLEADA"),
+    "mult_label": ("MULTIPLIER", "MULTIPLICADOR"),
+    "cities_label": ("CITIES", "CIUDADES"),
+    "ammo_label": ("AMMO", "MUNICIÓN"),
+    "ammo_inf": ("UNLIMITED", "ILIMITADA"),
+    "chain_label": ("BEST CHAIN", "MEJOR CADENA"),
+    "help_hint": ("F1  HELP", "F1  AYUDA"),
+    "defend": ("DEFEND THE CITIES", "DEFIENDE LAS CIUDADES"),
+    "points": ("×{n} POINTS", "PUNTOS ×{n}"),
+    "cleared": ("WAVE {n} CLEARED", "OLEADA {n} SUPERADA"),
+    "new_high": ("NEW HIGH SCORE", "NUEVO RÉCORD"),
+    "demo": ("DEMO", "DEMOSTRACIÓN"),
+    "ammo_on": ("I   INFINITE AMMO: ON", "I   MUNICIÓN INFINITA: SÍ"),
+    "ammo_off": ("I   INFINITE AMMO: OFF", "I   MUNICIÓN INFINITA: NO"),
+    "player": ("PLAYER {n}", "JUGADOR {n}"),
+    "abm_bonus": ("UNUSED ABMS", "ABM SOBRANTES"),
+    "city_bonus": ("CITIES SAVED", "CIUDADES SALVADAS"),
+    "table_inf": ("INFINITE AMMO", "MUNICIÓN INFINITA"),
+    "table_arcade": ("ARCADE RULES", "REGLAS DE RECREATIVA"),
+}
+
+
+def mix(a, b, t: float) -> tuple[int, int, int]:
+    t = clamp(t, 0.0, 1.0)
+    return (
+        int(a[0] + (b[0] - a[0]) * t),
+        int(a[1] + (b[1] - a[1]) * t),
+        int(a[2] + (b[2] - a[2]) * t),
+    )
+
+
+def ramp(stops, t: float) -> tuple[int, ...]:
+    """Color en la posición t de una rampa [(t0, color), (t1, color), ...]."""
+    t = clamp(t, 0.0, 1.0)
+    for (t0, c0), (t1, c1) in pairwise(stops):
+        if t <= t1:
+            f = 0.0 if t1 == t0 else (t - t0) / (t1 - t0)
+            return tuple(int(a + (b - a) * f) for a, b in zip(c0, c1))
+    return tuple(stops[-1][1])
+
+
+def gradient(size, stops):
+    """Degradado vertical opaco del tamaño pedido."""
+    w, h = max(1, int(size[0])), max(1, int(size[1]))
+    column = pygame.Surface((1, h))
+    for y in range(h):
+        column.set_at((0, y), ramp(stops, y / max(1, h - 1))[:3])
+    return pygame.transform.scale(column, (w, h))
+
+
+def soft_disc(radius: float, stops, alpha: bool = True):
+    """Disco con degradado radial. Con alpha=False es luz para sumar."""
+    r = max(1.0, radius)
+    size = int(r * 2) + 2
+    surf = pygame.Surface((size, size), pygame.SRCALPHA if alpha else 0)
+    if not alpha:
+        surf.fill((0, 0, 0))
+    c = size / 2
+    steps = max(4, min(int(r), 160))  # anillos de un píxel o poco más: sin bandas
+    for i in range(steps, 0, -1):
+        t = i / steps
+        color = ramp(stops, t)
+        pygame.draw.circle(surf, color if alpha else color[:3], (c, c), r * t)
+    return surf
+
+
+def hd_texts() -> list[str]:
+    out = []
+    for pair in HD_TEXTS.values():
+        out.extend(s.format(n=1) for s in pair)
+    return out
+
+
+@dataclass(slots=True, frozen=True)
+class HDPalette:
+    index: int
+    sky_top: tuple[int, int, int]
+    sky_mid: tuple[int, int, int]
+    horizon: tuple[int, int, int]
+    crest: tuple[int, int, int]
+    ground: tuple[int, int, int]
+    enemy: tuple[int, int, int]
+    city: tuple[int, int, int]
+
+
+def hd_palette(wave: int) -> HDPalette:
+    i = ((wave - 1) // 2) % len(WAVE_COLORS)
+    names = WAVE_COLORS[i]
+    top, horizon = HD_SKIES[i]
+    crest, ground = HD_GROUND[i]
+    enemy = HD_ENEMY.get(names[2], HD_ENEMY["red"])
+    city = mix((30, 34, 48), RGB_PHOSPHOR[names[3]], 0.2)
+    return HDPalette(
+        i, top, mix(top, horizon, 0.45), horizon, crest, ground, enemy, city
+    )
+
+
+class HDRenderer:
+    """Render en alta resolución: cielo nocturno, luz suave, bolas de fuego con
+    humo, ciudades con ventanas encendidas y torretas que siguen a la mira."""
+
+    style = "hd"
+    # Piezas de la caché que dependen de la paleta; el índice va siempre al final
+    palette_pieces = frozenset(
+        ("bg", "terrain", "city", "bunker", "cloud", "mini", "panel_city")
+    )
+
+    def __init__(self, juice: bool = True, lang: str = "en") -> None:
+        self.juice = juice
+        self.lang = lang if lang in LANGS else "en"
+        self.size = (0, 0)
+        self.rect = pygame.Rect(0, 0, W, H)
+        self.s = 1.0
+        self.ls = 0.25
+        self.pf = None
+        self.light = self.light_big = None
+        self.side = False
+        self.cache: dict = {}
+        self.fonts: dict = {}
+        self.rooms: dict = {}
+        self.texts: dict = {}
+        self.rng = random.Random(2026)
+        self.particles: list[
+            list
+        ] = []  # x, y, vx, vy, vida, total, tipo, color, x0, y0
+        self.puffs: list[list] = []  # x, y, vx, vy, vida, total, tamaño, alfa
+        self.popups: list[list] = []  # x, y, texto, vida, total, grande
+        self.rings: list[list] = []  # x, y, edad
+        self.muzzles: list[list] = []  # x, y, vida
+        self.smoking: dict[tuple[int, int], float] = {}
+        self.scorches: list[tuple[float, float, float]] = []
+        self.bomb_trails: dict[int, list[tuple[float, float]]] = {}
+        self.shake = 0.0
+        self.flash = 0.0
+        self.flash_rgb = (255, 170, 100)
+        self.toast, self.toast_frames = "", 0
+        self.title_layers: tuple | None = None
+        self.title_clock = -1
+        self.palette = hd_palette(1)
+        self.prep: tuple[int, list] = (-1, [])
+        self.recent = [self.palette.index]
+        r = random.Random(11)
+        self.twinkles = [
+            (
+                r.uniform(4, W - 4),
+                r.uniform(70, 226),
+                r.random() * math.tau,
+                r.uniform(0.5, 1.0),
+            )
+            for _ in range(36)
+        ]
+        self.clouds = [
+            (
+                n * (W + 90) / 4 + r.uniform(0, 30),
+                r.uniform(120, 192),
+                r.uniform(0.012, 0.036),
+                n,
+            )
+            for n in range(4)
+        ]
+        self.heights = list(TERRAIN)
+        for _ in range(2):  # el mismo relieve del original, suavizado
+            h = self.heights
+            self.heights = [
+                (
+                    h[max(0, i - 2)]
+                    + 4 * h[max(0, i - 1)]
+                    + 6 * h[i]
+                    + 4 * h[min(W - 1, i + 1)]
+                    + h[min(W - 1, i + 2)]
+                )
+                / 16
+                for i in range(W)
+            ]
+
+    # --- textos, conmutadores y coordenadas ------------------------------------
+
+    def t(self, key: str, **values) -> str:
+        return tr(key, self.lang, **values)
+
+    def ht(self, key: str, **values) -> str:
+        text = HD_TEXTS[key][1 if self.lang == "es" else 0]
+        return text.format(**values) if values else text
+
+    def say(self, key: str) -> None:
+        self.toast, self.toast_frames = key, 110
+
+    def set_juice(self, on: bool) -> None:
+        self.juice = on
+        for bucket in (
+            self.particles,
+            self.puffs,
+            self.popups,
+            self.rings,
+            self.muzzles,
+        ):
+            bucket.clear()
+        self.shake = self.flash = 0.0
+        self.say("fx_on" if on else "fx_off")
+
+    def toggle_lang(self) -> None:
+        self.lang = LANGS[(LANGS.index(self.lang) + 1) % len(LANGS)]
+        self.title_layers = None
+        self.say("lang")
+
+    def to_game(self, pos) -> tuple[float, float]:
+        r = self.rect
+        return ((pos[0] - r.x) * W / r.w, Y_MAX - (pos[1] - r.y) * H / r.h)
+
+    @property
+    def unit(self) -> float:
+        """Píxeles de pantalla por unidad del juego, para el ratón relativo."""
+        return self.rect.h / H
+
+    def P(self, x: float, y: float) -> tuple[float, float]:
+        return (x * self.s, (Y_MAX - y) * self.s)
+
+    def L(self, x: float, y: float) -> tuple[float, float]:
+        return (x * self.ls, (Y_MAX - y) * self.ls)
+
+    def _layout(self, size) -> None:
+        if size == self.size and self.pf is not None:
+            return
+        self.size = sw, sh = size
+        ph, pw = sh, round(sh * W / H)
+        if pw > sw:
+            pw, ph = sw, round(sw * H / W)
+        self.rect = pygame.Rect((sw - pw) // 2, (sh - ph) // 2, max(1, pw), max(1, ph))
+        rh = max(H, min(ph, HD_MAX_HEIGHT))
+        rw = round(rh * W / H)
+        self.pf = pygame.Surface((rw, rh)).convert()
+        self.light = pygame.Surface((max(1, rw // 4), max(1, rh // 4))).convert()
+        self.light_big = pygame.Surface((rw, rh)).convert()
+        self.s = rh / H
+        self.ls = self.light.get_height() / H
+        self.side = self.rect.x >= HD_PANEL_MIN
+        self.cache.clear()
+        self.texts.clear()
+        self.title_layers = None
+        self.prep = (-1, [])
+        for temp in range(3):  # las bolas de fuego de todos los tamaños, ya hechas:
+            for b in range(1, 28):  # sin tirones en la primera explosión de cada uno
+                self._fireball(temp, b / 2)
+        for b in range(1, 11):
+            self._puff(b / 2)
+
+    # --- tipografía ------------------------------------------------------------
+
+    def font(self, px: float):
+        px = max(9, int(px))
+        f = self.fonts.get(px)
+        if f is None:
+            f = self.fonts[px] = pygame.font.Font(None, px)
+        return f
+
+    def label(self, text: str, px: float, color, shadow: bool = True):
+        key = (text, int(px), color, shadow)
+        surf = self.texts.get(key)
+        if surf is None:
+            if len(self.texts) > 900:
+                self.texts.clear()
+            f = self.font(px)
+            body = f.render(text, True, color)
+            # SDL_ttf baja la línea base cuando una tilde sobresale por arriba. Aquí
+            # todas las etiquetas de un tamaño comparten alto y línea base: RATÓN
+            # queda alineada con APUNTAR sea cual sea el anclaje.
+            room, box = self._font_box(f)
+            tops = [g[3] for g in f.metrics(text) if g]
+            top = room - max(0, max(tops, default=0) - f.get_ascent())
+            off = max(1, int(px) // 16) if shadow else 0
+            h = max(box, top + body.get_height()) + off
+            surf = pygame.Surface((body.get_width() + off, h), pygame.SRCALPHA)
+            if shadow:
+                back = f.render(text, True, (0, 0, 0))
+                back.set_alpha(150)
+                surf.blit(back, (off, top + off))
+            surf.blit(body, (0, top))
+            self.texts[key] = surf
+        return surf
+
+    def _font_box(self, f) -> tuple[int, int]:
+        """Lo que una mayúscula con tilde sobresale por encima del ascent y el alto
+        común de las etiquetas de esa fuente, con sitio para la tilde."""
+        box = self.rooms.get(f)
+        if box is None:
+            top = max(g[3] for g in f.metrics("ÁÉÍÓÚÑÜ") if g)
+            room = max(0, top - f.get_ascent())
+            box = self.rooms[f] = (
+                room,
+                f.render("A", True, (0, 0, 0)).get_height() + room + 1,
+            )
+        return box
+
+    def put(
+        self, target, text, px, color, pos, anchor="center", alpha=255, shadow=True
+    ):
+        surf = self.label(text, px, color, shadow)
+        if alpha < 255:
+            surf = surf.copy()
+            surf.set_alpha(max(0, int(alpha)))
+        rect = surf.get_rect(**{anchor: (round(pos[0]), round(pos[1]))})
+        target.blit(surf, rect)
+        return rect
+
+    # --- piezas cacheadas --------------------------------------------------------
+
+    def _sky_stops(self):
+        p = self.palette
+        return (
+            (0.0, p.sky_top),
+            (0.62, p.sky_mid),
+            (0.92, p.horizon),
+            (1.0, p.horizon),
+        )
+
+    def _sky_at(self, y: float) -> tuple[int, int, int]:
+        return ramp(self._sky_stops(), (Y_MAX - y) / H)[:3]
+
+    def _background(self):
+        p = self.palette
+        key = ("bg", p.index)
+        surf = self.cache.get(key)
+        if surf is not None:
+            return surf
+        rw, rh = self.pf.get_size()
+        surf = gradient((rw, rh), self._sky_stops()).convert()
+        rng = random.Random(5)
+        band = pygame.Surface((64, 58))
+        for yy in range(58):  # la Vía Láctea, una banda tenue en diagonal
+            for xx in range(64):
+                d = abs(yy / 57 - 0.08 - xx / 63 * 0.62)
+                k = max(0.0, 1.0 - d * 5.5) ** 2 * (0.7 + 0.3 * rng.random())
+                band.set_at((xx, yy), (int(20 * k), int(18 * k), int(28 * k)))
+        surf.blit(
+            pygame.transform.smoothscale(band, (rw, rh)),
+            (0, 0),
+            special_flags=pygame.BLEND_ADD,
+        )
+        for _ in range(520):
+            x, y = rng.random() * rw, rng.random() * rh * 0.8
+            if abs(y / rh - 0.08 - x / rw * 0.62) > 0.12 and rng.random() < 0.5:
+                continue
+            b = 40 + rng.random() ** 3 * 170
+            size = 2 if b > 165 and self.s > 2.5 else 1
+            surf.fill(
+                (int(b), int(b * 0.96), int(min(255, b * 1.1))),
+                (int(x), int(y), size, size),
+            )
+        self._moon(surf)
+        for layer, (base, amp, freq, dark) in enumerate(
+            ((22, 26, 0.045, 0.42), (13, 17, 0.07, 0.7))
+        ):
+            pts = [(0, rh)]
+            for x in range(0, W + 2, 2):
+                wave = 0.55 + 0.25 * math.sin(x * freq + layer * 1.7)
+                wave += 0.2 * math.sin(x * freq * 2.7 + layer * 4.1)
+                pts.append(self.P(x, base + amp * wave))
+            pts.append((rw, rh))
+            color = mix(p.horizon, (6, 7, 12), dark)
+            pygame.draw.polygon(surf, color, pts)
+            pygame.draw.aalines(surf, mix(color, p.horizon, 0.35), False, pts[1:-1])
+        self.cache[key] = surf
+        return surf
+
+    def _moon(self, surf) -> None:
+        """Luna creciente: cara iluminada a la derecha y el resto casi negro, con
+        la luz cenicienta justa para adivinar el disco."""
+        cx, cy = self.P(*HD_MOON)
+        r = 6.5 * self.s
+        halo = soft_disc(
+            r * 1.5,
+            ((0, (34, 38, 52)), (0.22, (16, 18, 26)), (1, (0, 0, 0))),
+            alpha=False,
+        )
+        halo = pygame.transform.smoothscale(
+            halo, (halo.get_width() * 4, halo.get_height() * 4)
+        )
+        surf.blit(
+            halo,
+            (cx - halo.get_width() / 2, cy - halo.get_height() / 2),
+            special_flags=pygame.BLEND_ADD,
+        )
+        k = 3  # dibujada a triple tamaño y reducida: bordes y terminador suaves
+        big_r = r * k
+        size = int(big_r * 2) + 4 * k
+        c = size / 2
+        disc = pygame.Surface((size, size), pygame.SRCALPHA)
+        pygame.draw.circle(disc, (214, 214, 202, 255), (c, c), big_r)
+        rng = random.Random(9)
+        for _ in range(9):  # mares
+            a, d = rng.random() * math.tau, rng.random() * big_r * 0.7
+            spot = (c + math.cos(a) * d, c + math.sin(a) * d)
+            pygame.draw.circle(
+                disc, (192, 192, 182, 255), spot, big_r * rng.uniform(0.08, 0.22)
+            )
+        shade = pygame.Surface((size, size))
+        shade.fill((255, 255, 255))
+        pygame.draw.circle(
+            shade, (40, 44, 62), (c - big_r * 0.5, c - big_r * 0.12), big_r * 0.98
+        )
+        blur = max(1, size // 5)
+        shade = pygame.transform.smoothscale(
+            pygame.transform.smoothscale(shade, (blur, blur)), (size, size)
+        )
+        disc.blit(shade, (0, 0), special_flags=pygame.BLEND_RGB_MULT)
+        out = int(size / k)
+        disc = pygame.transform.smoothscale(disc, (out, out))
+        surf.blit(disc, (cx - out / 2, cy - out / 2))
+
+    def _cloud(self, n: int):
+        """Cúmulo nocturno: base plana, cumbres redondas, cuerpo en sombra y un
+        filo plateado en el lado de la luna."""
+        p = self.palette
+        key = ("cloud", n, p.index)
+        surf = self.cache.get(key)
+        if surf is not None:
+            return surf
+        rng = random.Random(100 + n)
+        scale = (0.85, 1.15, 0.7, 1.0)[n % 4]
+        w, h = 66 * scale * self.s, 26 * scale * self.s
+        surf = pygame.Surface((int(w), int(h)), pygame.SRCALPHA)
+        body = mix(p.sky_mid, (8, 10, 18), 0.3)
+        rim = mix(p.horizon, (176, 184, 210), 0.42)
+        base, count = h * 0.7, 9 + n % 3
+        puffs = []
+        for j in range(count):
+            f = (j + 0.5) / count
+            rr = (
+                h
+                * (0.13 + 0.2 * math.sin(math.pi * f) ** 1.3)
+                * rng.uniform(0.85, 1.15)
+            )
+            x = w * (0.16 + 0.68 * f + rng.uniform(-0.025, 0.025))
+            puffs.append((x, base - rr * rng.uniform(0.3, 0.75), rr))
+        for x, y, rr in puffs:  # el filo de luz, algo desplazado hacia la luna
+            blob = soft_disc(
+                rr * 1.3, ((0, (*rim, 84)), (0.7, (*rim, 44)), (1, (*rim, 0)))
+            )
+            surf.blit(
+                blob,
+                (
+                    x + rr * 0.2 - blob.get_width() / 2,
+                    y - rr * 0.24 - blob.get_height() / 2,
+                ),
+            )
+        for x, y, rr in puffs:  # el cuerpo tapa casi todo el filo: solo queda el borde
+            blob = soft_disc(
+                rr * 1.22, ((0, (*body, 150)), (0.62, (*body, 104)), (1, (*body, 0)))
+            )
+            surf.blit(blob, (x - blob.get_width() / 2, y - blob.get_height() / 2))
+        self.cache[key] = surf
+        return surf
+
+    def _terrain(self):
+        p = self.palette
+        key = ("terrain", p.index)
+        surf = self.cache.get(key)
+        if surf is not None:
+            return surf
+        rw, rh = self.pf.get_size()
+        hs = self.heights
+        top = [(0.0, self.P(0, hs[0])[1])] + [self.P(x + 0.5, hs[x]) for x in range(W)]
+        top.append((float(rw), self.P(W, hs[-1])[1]))
+        surf = pygame.Surface((rw, rh), pygame.SRCALPHA)
+        pygame.draw.polygon(surf, (255, 255, 255, 255), top + [(rw, rh), (0, rh)])
+        crest_y = self.P(0, max(hs))[1] / rh
+        grad = gradient(
+            (rw, rh), ((0.0, p.crest), (crest_y, p.crest), (1.0, p.ground))
+        ).convert_alpha()
+        surf.blit(grad, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
+        shade, glint, mottle = self._relief()
+        surf.blit(mottle, (0, 0), special_flags=pygame.BLEND_RGB_MULT)
+        surf.blit(shade, (0, 0), special_flags=pygame.BLEND_RGB_MULT)
+        surf.blit(glint, (0, 0), special_flags=pygame.BLEND_RGB_ADD)
+        rng = random.Random(3)
+        for _ in range(int(rw * 2.4)):  # grano del suelo
+            x = rng.random() * (rw - 1)
+            y0 = self.P(0, hs[min(W - 1, int(x / self.s))])[1] + 2
+            y = rng.uniform(y0, rh - 1)
+            c = surf.get_at((int(x), int(y)))
+            if c.a:
+                k = rng.uniform(0.8, 1.2)
+                surf.set_at(
+                    (int(x), int(y)),
+                    (
+                        min(255, int(c.r * k)),
+                        min(255, int(c.g * k)),
+                        min(255, int(c.b * k)),
+                        255,
+                    ),
+                )
+        pygame.draw.aalines(surf, mix(p.crest, (255, 255, 255), 0.16), False, top)
+        y0 = max(0, int(min(y for _, y in top)) - 2)  # solo la franja con suelo
+        surf = self.cache[key] = (surf.subsurface((0, y0, rw, rh - y0)).copy(), y0)
+        return surf
+
+    def _relief(self):
+        """Luz de luna sobre el relieve: las laderas que miran a la luna se platean,
+        las otras se hunden en sombra, y unas manchas rompen el color plano."""
+        maps = self.cache.get(("relief",))
+        if maps is not None:
+            return maps
+        size = self.pf.get_size()
+        hs = self.heights
+        shade, glint = pygame.Surface((W, H)), pygame.Surface((W, H))
+        shade.fill((255, 255, 255))
+        glint.fill((0, 0, 0))
+        for x in range(W):
+            slope = (
+                hs[max(0, x - 2)] - hs[min(W - 1, x + 2)]
+            ) / 4  # > 0: baja hacia la luna
+            light = clamp(0.2 + slope * 0.9, -1.0, 1.0)
+            row = int(Y_MAX - hs[x])
+            for y in range(max(0, row), H):
+                d = y - row
+                if light > 0:
+                    v = 64 * light * math.exp(-d / 3.2)
+                    glint.set_at((x, y), (int(v * 0.72), int(v * 0.8), int(v)))
+                else:
+                    m = int(255 * (1 + 0.5 * light * math.exp(-d / 6)))
+                    shade.set_at((x, y), (m, m, m))
+        rng = random.Random(21)
+        small = pygame.Surface((48, 44))
+        for y in range(44):
+            for x in range(48):
+                m = int(255 * rng.uniform(0.8, 1.0))
+                small.set_at((x, y), (m, m, int(m * rng.uniform(0.97, 1.0))))
+        maps = (
+            pygame.transform.smoothscale(shade, size),
+            pygame.transform.smoothscale(glint, size),
+            pygame.transform.smoothscale(small, size),
+        )
+        self.cache[("relief",)] = maps
+        return maps
+
+    def _city(self, i: int, alive: bool):
+        """Silueta de ciudad dibujada a triple resolución y reducida: bordes suaves."""
+        p = self.palette
+        key = ("city", i, alive, p.index)
+        surf = self.cache.get(key)
+        if surf is not None:
+            return surf
+        k = self.s * 3
+        bw, bh = 18, 15
+        big = pygame.Surface(
+            (max(1, int(bw * k)), max(1, int(bh * k))), pygame.SRCALPHA
+        )
+        ground = bh * k
+        rng = random.Random(i * 7919 + 17)
+        if alive:
+            x, tallest = -8.4, (0.0, 1.0, 0.0)
+            face = mix(p.city, (118, 128, 158), 0.2)
+            shade = mix(p.city, (0, 0, 0), 0.45)
+            while x < 8.0:
+                w = min(rng.uniform(1.9, 3.6), 8.4 - x)
+                if w < 1.1:
+                    break
+                centre = 1 - abs(x + w / 2) / 9
+                h = rng.uniform(3.2, 5.6) + 6.4 * centre * rng.uniform(0.4, 1.0)
+                rect = pygame.Rect(
+                    int((x + 9) * k),
+                    int(ground - h * k),
+                    max(1, int(w * k)),
+                    int(h * k) + 1,
+                )
+                big.blit(gradient(rect.size, ((0, face), (1, shade))), rect)
+                edge = mix(face, (210, 220, 245), 0.35)
+                pygame.draw.line(
+                    big, edge, rect.topleft, rect.bottomleft, max(1, int(k * 0.12))
+                )
+                cols, rows = max(1, int(w / 0.95)), max(1, int(h / 1.15))
+                for row in range(rows):
+                    for col in range(cols):
+                        wx = rect.x + (col + 0.3) * rect.w / cols
+                        wy = rect.y + (row + 0.35) * rect.h / rows * 0.96
+                        if wy + 0.5 * k >= rect.bottom - 0.4 * k:
+                            continue
+                        if rng.random() < 0.52:
+                            warm = (
+                                255,
+                                int(rng.uniform(168, 214)),
+                                int(rng.uniform(88, 140)),
+                            )
+                            lit = warm if rng.random() < 0.86 else (172, 212, 255)
+                            color = mix(lit, face, rng.uniform(0.0, 0.35))
+                        else:
+                            color = mix(shade, (10, 12, 20), 0.5)
+                        big.fill(
+                            color,
+                            (
+                                int(wx),
+                                int(wy),
+                                max(1, int(0.42 * k)),
+                                max(1, int(0.5 * k)),
+                            ),
+                        )
+                if rng.random() < 0.5:
+                    roof = (
+                        int(rect.x + rect.w * 0.2),
+                        int(rect.y - 0.6 * k),
+                        max(1, int(rect.w * 0.35)),
+                        int(0.6 * k) + 1,
+                    )
+                    big.fill(shade, roof)
+                if h > tallest[2]:
+                    tallest = (x + w * 0.55, w, h)
+                x += w + rng.uniform(0.12, 0.45)
+            ax = (tallest[0] + 9) * k
+            mast = mix(p.city, (180, 190, 214), 0.4)
+            pygame.draw.line(
+                big,
+                mast,
+                (ax, ground - tallest[2] * k),
+                (ax, ground - (tallest[2] + 2.4) * k),
+                max(1, int(k * 0.16)),
+            )
+            self.cache[("antenna", i)] = (tallest[0], tallest[2] + 2.4)
+        else:
+            pts, x = [(0.0, ground)], 0.4
+            while x < bw - 0.4:
+                pts.append((x * k, ground - rng.uniform(0.4, 2.6) * k))
+                x += rng.uniform(0.6, 1.4)
+            pts.append(((bw - 0.4) * k, ground))
+            pygame.draw.polygon(big, (36, 31, 31), pts)
+            for _ in range(4):
+                sx, w, h = (
+                    rng.uniform(1.5, bw - 3) * k,
+                    rng.uniform(1.0, 2.0) * k,
+                    rng.uniform(1.5, 4.2) * k,
+                )
+                stub = [
+                    (sx, ground),
+                    (sx, ground - h),
+                    (sx + w * 0.4, ground - h * 0.74),
+                    (sx + w, ground - h * 0.9),
+                    (sx + w, ground),
+                ]
+                pygame.draw.polygon(big, (48, 42, 42), stub)
+            self.cache[("embers", i)] = [
+                (rng.uniform(-7, 7), rng.uniform(0.3, 2.4), rng.random() * math.tau)
+                for _ in range(8)
+            ]
+        surf = pygame.transform.smoothscale(
+            big, (max(1, int(bw * self.s)), max(1, int(bh * self.s)))
+        )
+        self.cache[key] = surf
+        return surf
+
+    def _bunker(self):
+        key = ("bunker", self.palette.index)
+        surf = self.cache.get(key)
+        if surf is not None:
+            return surf
+        k = self.s * 3
+        bw, bh = 12, 6
+        big = pygame.Surface((int(bw * k), int(bh * k)), pygame.SRCALPHA)
+        cx, base = bw * k / 2, bh * k
+        slab = pygame.Rect(
+            int(cx - 5.2 * k), int(base - 1.3 * k), int(10.4 * k), int(1.3 * k)
+        )
+        big.blit(gradient(slab.size, ((0, (126, 128, 136)), (1, (62, 64, 72)))), slab)
+        r = 3.6 * k
+        dome = pygame.Surface((int(2 * r) + 2, int(r) + 2), pygame.SRCALPHA)
+        pygame.draw.circle(dome, (255, 255, 255, 255), (r + 1, r + 1), r)
+        tint = gradient(
+            dome.get_size(), ((0, (176, 180, 190)), (1, (82, 86, 96)))
+        ).convert_alpha()
+        dome.blit(tint, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
+        big.blit(dome, (cx - r - 1, base - 1.3 * k - r - 1))
+        pygame.draw.line(
+            big,
+            (60, 62, 70),
+            (cx - r * 0.9, base - 1.3 * k),
+            (cx + r * 0.9, base - 1.3 * k),
+            max(1, int(k * 0.2)),
+        )
+        pygame.draw.arc(
+            big,
+            (210, 214, 224),
+            (cx - r, base - 1.3 * k - r, 2 * r, 2 * r),
+            math.pi * 0.25,
+            math.pi * 0.75,
+            max(1, int(k * 0.18)),
+        )
+        surf = pygame.transform.smoothscale(big, (int(bw * self.s), int(bh * self.s)))
+        self.cache[key] = surf
+        return surf
+
+    def _crater(self):
+        key = ("crater",)
+        surf = self.cache.get(key)
+        if surf is None:
+            k = self.s * 3
+            big = pygame.Surface((int(14 * k), int(5 * k)), pygame.SRCALPHA)
+            pygame.draw.ellipse(big, (22, 18, 18, 255), (k * 1, k * 1.6, k * 12, k * 3))
+            pygame.draw.ellipse(big, (10, 8, 8, 255), (k * 3, k * 2.4, k * 8, k * 1.8))
+            rng = random.Random(4)
+            for _ in range(7):
+                x, y = rng.uniform(1.5, 12.5) * k, rng.uniform(1.0, 2.5) * k
+                pygame.draw.circle(
+                    big, (54, 46, 44, 255), (x, y), k * rng.uniform(0.4, 0.8)
+                )
+            surf = pygame.transform.smoothscale(
+                big, (int(14 * self.s), int(5 * self.s))
+            )
+            self.cache[key] = surf
+        return surf
+
+    def _flier(self, kind: int, left: bool):
+        key = ("flier", kind, left)
+        surf = self.cache.get(key)
+        if surf is not None:
+            return surf
+        k = self.s * 3
+        w, h = (16, 9) if kind == BOMBER else (15, 8)
+        big = pygame.Surface((int(w * k), int(h * k)), pygame.SRCALPHA)
+
+        def pt(x, y):
+            return (x * k, y * k)
+
+        if kind == BOMBER:  # vista cenital, morro a la derecha
+            wing = [pt(6.4, 4.5), pt(9.6, 4.5), pt(6.0, 0.4), pt(4.4, 0.4)]
+            pygame.draw.polygon(big, (70, 76, 92), wing)
+            pygame.draw.polygon(big, (70, 76, 92), [(x, h * k - y) for x, y in wing])
+            pygame.draw.polygon(
+                big,
+                (64, 70, 86),
+                [pt(1.0, 4.5), pt(2.6, 4.5), pt(1.2, 2.2), pt(0.4, 2.2)],
+            )
+            pygame.draw.polygon(
+                big,
+                (64, 70, 86),
+                [pt(1.0, 4.5), pt(2.6, 4.5), pt(1.2, 6.8), pt(0.4, 6.8)],
+            )
+            pygame.draw.ellipse(
+                big, (98, 104, 122), (k * 0.6, k * 3.6, k * 14.6, k * 1.8)
+            )
+            pygame.draw.ellipse(
+                big, (150, 158, 178), (k * 3.0, k * 3.75, k * 10.0, k * 0.5)
+            )
+            pygame.draw.ellipse(
+                big, (70, 150, 196), (k * 12.2, k * 3.9, k * 2.0, k * 1.2)
+            )
+        else:  # satélite: cuerpo dorado y dos paneles solares
+            for x0 in (0.4, 9.6):
+                panel = pygame.Rect(
+                    int(x0 * k), int(2.6 * k), int(5.0 * k), int(2.8 * k)
+                )
+                pygame.draw.rect(big, (34, 58, 116), panel)
+                for gx in range(1, 4):
+                    pygame.draw.line(
+                        big,
+                        (70, 110, 190),
+                        (panel.x + panel.w * gx / 4, panel.y),
+                        (panel.x + panel.w * gx / 4, panel.bottom),
+                        max(1, int(k * 0.1)),
+                    )
+                pygame.draw.line(
+                    big,
+                    (70, 110, 190),
+                    (panel.x, panel.centery),
+                    (panel.right, panel.centery),
+                    max(1, int(k * 0.1)),
+                )
+            body = pygame.Rect(int(5.4 * k), int(1.8 * k), int(4.2 * k), int(4.4 * k))
+            big.blit(
+                gradient(body.size, ((0, (214, 180, 96)), (1, (130, 98, 46)))), body
+            )
+            pygame.draw.line(
+                big,
+                (190, 190, 200),
+                (7.5 * k, 1.8 * k),
+                (7.5 * k, 0.3 * k),
+                max(1, int(k * 0.15)),
+            )
+        surf = pygame.transform.smoothscale(big, (int(w * self.s), int(h * self.s)))
+        if left:
+            surf = pygame.transform.flip(surf, True, False)
+        self.cache[key] = surf
+        return surf
+
+    def _fireball(self, temp: int, r: float):
+        b = max(1, round(r * 2))
+        key = ("fire", temp, b)
+        surf = self.cache.get(key)
+        if surf is None:
+            surf = self.cache[key] = soft_disc(b / 2 * self.s * 1.06, FIRE_STOPS[temp])
+        return surf
+
+    def _puff(self, r: float):
+        b = max(1, round(r * 2))
+        key = ("puff", b)
+        surf = self.cache.get(key)
+        if surf is None:
+            surf = self.cache[key] = soft_disc(b / 2 * self.s, SMOKE_STOPS)
+        return surf
+
+    def _glow(self, color, r: float):
+        b = max(1, round(r * 4))
+        key = ("glow", color, b)
+        surf = self.cache.get(key)
+        if surf is None:
+            stops = ((0, (255, 255, 255, 255)), (0.25, (*color, 220)), (1, (*color, 0)))
+            surf = self.cache[key] = soft_disc(b / 4 * self.s, stops)
+        return surf
+
+    def _light_sprite(self, color, radius_px: float):
+        b = max(1, int(radius_px / 2))
+        color = tuple(c & ~3 for c in color)  # pocos colores distintos: caché acotada
+        key = ("light", color, b)
+        surf = self.cache.get(key)
+        if surf is None:
+            stops = ((0, color), (0.4, mix(color, (0, 0, 0), 0.55)), (1, (0, 0, 0)))
+            surf = self.cache[key] = soft_disc(b * 2, stops, alpha=False)
+        return surf
+
+    def _add_light(self, x: float, y: float, color, r: float) -> None:
+        spr = self._light_sprite(color, r * self.ls)
+        lx, ly = self.L(x, y)
+        self.light.blit(
+            spr,
+            (lx - spr.get_width() / 2, ly - spr.get_height() / 2),
+            special_flags=pygame.BLEND_ADD,
+        )
+
+    def _vignette(self):
+        key = ("vignette",)
+        surf = self.cache.get(key)
+        if surf is None:
+            small = pygame.Surface((64, 58))
+            for y in range(58):
+                for x in range(64):
+                    d = ((x + 0.5) / 32 - 1) ** 2 * 0.9 + ((y + 0.5) / 29 - 1) ** 2
+                    v = int(255 * clamp(1.08 - 0.42 * d**1.25, 0.6, 1.0))
+                    small.set_at((x, y), (v, v, v))
+            surf = self.cache[key] = pygame.transform.smoothscale(
+                small, self.pf.get_size()
+            )
+        return surf
+
+    # --- efectos: se alimentan de los sucesos del juego, un frame cada vez --------
+
+    def tick(self, g: Game) -> None:
+        if self.juice:
+            for f in g.fx:
+                self._on_fx(f, g)
+        self.shake *= 0.85
+        self.flash *= 0.85
+        if self.toast_frames:
+            self.toast_frames -= 1
+        if g.phase is Phase.TITLE and self.title_layers is not None:
+            for e in g.explosions:  # las explosiones se comen las letras del título
+                if e is not None and e.radius:
+                    for layer in self.title_layers:
+                        pygame.draw.circle(
+                            layer,
+                            (0, 0, 0, 0),
+                            self.P(e.x, e.y),
+                            e.radius * self.s * 1.05,
+                        )
+        if g.phase is Phase.TALLY and self.pf is not None:
+            self._prepare(hd_palette(g.wave + 1))
+        if not self.juice:
+            return
+        alive = []
+        for p in self.particles:
+            p[8], p[9] = p[0], p[1]
+            p[0] += p[2]
+            p[1] += p[3]
+            if p[6] == SPARK:
+                p[2] *= 0.985
+                p[3] = p[3] * 0.985 - 0.03
+            elif p[6] == DEBRIS:
+                p[3] -= 0.06
+                ground = self.heights[int(clamp(p[0], 0, W - 1))]
+                if p[1] <= ground:
+                    p[1], p[3], p[2] = ground, -p[3] * 0.3, p[2] * 0.55
+            else:
+                p[2] *= 0.99
+                p[3] = p[3] * 0.99 - 0.004
+            p[4] -= 1
+            if p[4] > 0:
+                alive.append(p)
+        self.particles = alive[-1600:]
+        for q in self.puffs:
+            q[0] += q[2]
+            q[1] += q[3]
+            q[4] -= 1
+        self.puffs = [q for q in self.puffs if q[4] > 0][-700:]
+        for pop in self.popups:
+            pop[1] = min(pop[1] + 0.3, POPUP_CEILING)
+            pop[3] -= 1
+        self.popups = [pop for pop in self.popups if pop[3] > 0]
+        for ring in self.rings:
+            ring[2] += 1
+        self.rings = [ring for ring in self.rings if ring[2] < 18]
+        for m in self.muzzles:
+            m[2] -= 1
+        self.muzzles = [m for m in self.muzzles if m[2] > 0]
+        rng = self.rng
+        if g.phase in FIELD_PHASES or g.phase in (
+            Phase.REGEN,
+            Phase.PLAYER_OUT,
+            Phase.THE_END,
+        ):
+            for x, y in self.smoking:
+                if rng.random() < 0.32:
+                    self.puffs.append([
+                        x + rng.uniform(-4, 4), y + rng.uniform(1, 4), rng.uniform(-0.03, 0.08),
+                        rng.uniform(0.12, 0.26), rng.randrange(130, 200), 200, rng.uniform(1.1, 1.8), 70,
+                    ])  # fmt: skip
+            for m in g.incoming:
+                if (
+                    m is not None
+                    and m.kind == ICBM
+                    and (g.frame + m.serial * 3) % 4 == 0
+                ):
+                    self.puffs.append(
+                        [m.x, m.y, rng.uniform(-0.02, 0.02), 0.015, 70, 70, 0.7, 38]
+                    )
+        live = set()
+        for m in g.incoming:
+            if m is not None and m.kind == SMART:
+                live.add(m.serial)
+                trail = self.bomb_trails.setdefault(m.serial, [])
+                if g.frame % 2 == 0:
+                    trail.append((m.x, m.y))
+                    del trail[:-8]
+        for serial in list(self.bomb_trails):
+            if serial not in live:
+                del self.bomb_trails[serial]
+
+    def _use_palette(self, palette: HDPalette) -> None:
+        """Cambia de paleta y suelta las piezas de las viejas. Guarda las tres
+        últimas, porque a dos jugadores las oleadas se alternan."""
+        if palette.index != self.palette.index:
+            self.recent = [palette.index] + [
+                i for i in self.recent if i != palette.index
+            ][:2]
+            keep = {*self.recent, self.prep[0]}
+            for key in [
+                k
+                for k in self.cache
+                if k[0] in self.palette_pieces and k[-1] not in keep
+            ]:
+                del self.cache[key]
+        self.palette = palette
+
+    def _prepare(self, palette: HDPalette) -> None:
+        """Durante el recuento deja hecha, una pieza por frame, la escena con los
+        colores de la oleada siguiente: el cambio de paleta llega sin tirón."""
+        if palette.index == self.palette.index:
+            return
+        if self.prep[0] != palette.index:
+            jobs = [self._background, self._terrain, self._bunker]
+            jobs += [
+                lambda i=i, a=a: self._city(i, a)
+                for i in range(len(CITIES))
+                for a in (True, False)
+            ]
+            jobs += [lambda n=n: self._cloud(n) for n in range(len(self.clouds))]
+            self.prep = (palette.index, jobs)
+        if self.prep[1]:
+            current, self.palette = self.palette, palette
+            try:
+                self.prep[1].pop(0)()
+            finally:
+                self.palette = current
+
+    def _burst(
+        self, x, y, n, speed, kind=SPARK, colors=None, life=(18, 40), up=0.0
+    ) -> None:
+        r = self.rng
+        for _ in range(n):
+            a = r.random() * math.tau
+            v = speed * (0.3 + r.random())
+            ttl = r.randrange(*life)
+            color = r.choice(colors) if colors else None
+            vx, vy = math.cos(a) * v, math.sin(a) * v + up
+            self.particles.append([x, y, vx, vy, ttl, ttl, kind, color, x, y])
+
+    def _flash(self, rgb, amount) -> None:
+        if amount > self.flash:
+            self.flash, self.flash_rgb = amount, rgb
+
+    def _on_fx(self, f: FX, g: Game) -> None:
+        name, rng = f.name, self.rng
+        if name == "boom":
+            if not f.a and g.phase is not Phase.TITLE:
+                self.rings.append([f.x, f.y, 0])
+            if f.a and f.y < LOWEST:  # impacto en el suelo: una nube de polvo
+                for _ in range(6):
+                    self.puffs.append([
+                        f.x + rng.uniform(-3, 3), f.y + rng.uniform(0, 3), rng.uniform(-0.12, 0.12),
+                        rng.uniform(0.04, 0.16), rng.randrange(80, 140), 140, rng.uniform(1.2, 2.2), 80,
+                    ])  # fmt: skip
+        elif name == "kill":
+            self._burst(
+                f.x,
+                f.y,
+                (10, 18, 26)[f.c - 1],
+                1.2 if f.c == KILL_ICBM else 1.6,
+                life=(14, 34),
+            )
+            self._burst(
+                f.x,
+                f.y,
+                4 if f.c == KILL_ICBM else 9,
+                0.5,
+                EMBER,
+                life=(40, 80),
+                up=0.25,
+            )
+            for _ in range(3):
+                self.puffs.append([
+                    f.x + rng.uniform(-2, 2), f.y + rng.uniform(-2, 2), rng.uniform(-0.05, 0.05),
+                    rng.uniform(0.02, 0.08), rng.randrange(70, 120), 120, rng.uniform(1.0, 1.8), 55,
+                ])  # fmt: skip
+            if f.a:
+                small = [pop for pop in self.popups if not pop[5]]
+                if len(small) >= 6:  # en las cadenas largas, sin muro de números
+                    self.popups.remove(small[0])
+                self.popups.append(
+                    [f.x, min(f.y + 8, POPUP_CEILING), f"+{f.a}", 48, 48, False]
+                )
+            if f.b >= 3:
+                label = self.t("chain", n=f.b)
+                self.popups.append(
+                    [f.x, min(f.y + 15, POPUP_CEILING), label, 84, 84, True]
+                )
+                self.shake = max(self.shake, min(0.5 + f.b * 0.22, 2.0))
+            if f.c == KILL_FLIER:
+                self.shake = max(self.shake, 1.2)
+        elif name in ("city", "silo"):
+            tint = self.palette.city if name == "city" else (110, 112, 120)
+            colors = [mix(tint, (0, 0, 0), 0.3), (52, 46, 44), (84, 76, 72)]
+            self._burst(f.x, f.y + 2, 44, 1.6, DEBRIS, colors, (70, 140), up=1.1)
+            self._burst(f.x, f.y + 3, 26, 2.0, SPARK, life=(20, 46), up=0.7)
+            self._burst(f.x, f.y + 4, 18, 0.6, EMBER, life=(60, 120), up=0.5)
+            for _ in range(10):
+                self.puffs.append([
+                    f.x + rng.uniform(-5, 5), f.y + rng.uniform(0, 6), rng.uniform(-0.1, 0.1),
+                    rng.uniform(0.06, 0.2), rng.randrange(120, 200), 200, rng.uniform(1.6, 3.0), 90,
+                ])  # fmt: skip
+            self.shake = max(self.shake, 2.6 if name == "city" else 3.0)
+            self._flash((255, 140, 70), 0.16)
+            ground = f.y - 5 if name == "city" else f.y
+            self.smoking[(int(f.x), int(ground) + 2)] = 1.0
+            self.scorches.append((f.x, ground + 1, 9 if name == "city" else 7))
+        elif name in ("abm", "low"):
+            self.muzzles.append([f.x, f.y, 8])
+            self._burst(f.x, f.y + 3, 4, 0.7, SPARK, life=(6, 14), up=0.8)
+        elif name in ("mirv", "flier_fire"):
+            self._burst(f.x, f.y, 8, 0.8, SPARK, life=(8, 18))
+        elif name == "bonus_city":
+            self._burst(f.x, f.y + 6, 26, 0.6, EMBER, None, (50, 90), up=0.5)
+            self.rings.append([f.x, f.y + 3, 0])
+        elif name == "game_over":
+            self.shake = 4.0
+            self._flash((255, 120, 60), 0.3)
+        elif name in ("wave", "start", "player_out"):
+            self.smoking.clear()
+            self.scorches.clear()
+            self.puffs.clear()
+
+    # --- dibujo -------------------------------------------------------------------
+
+    def draw(self, g: Game, screen, overlay: str | None = None) -> None:
+        self._layout(screen.get_size())
+        menu = g.phase in (Phase.TITLE, Phase.SCORES, Phase.INITIALS, Phase.STATS)
+        self._use_palette(hd_palette(1 if menu else g.wave))
+        self.pf.blit(self._background(), (0, 0))
+        self.light.fill((0, 0, 0))
+        field = not menu or g.phase is Phase.TITLE
+        if field:
+            self._trail_glow(g)
+        if self.juice:
+            self._searchlights(g, menu)
+        self._sky_life(g)
+        self._ground(g, menu)
+        if self.juice:
+            self._smoke()
+        if g.phase is Phase.TITLE:
+            self._title_art(g)
+        if field:
+            self._field(g)
+        if g.phase is Phase.THE_END:
+            self._the_end_fire(g)
+        pygame.transform.smoothscale(self.light, self.pf.get_size(), self.light_big)
+        self.pf.blit(self.light_big, (0, 0), special_flags=pygame.BLEND_ADD)
+        self.pf.blit(self._vignette(), (0, 0), special_flags=pygame.BLEND_MULT)
+        self._phase_text(g)
+        if self.juice:
+            self._popups()
+        if not self.side:
+            self._hud_top(g)
+        if overlay:
+            self._overlay(overlay)
+        self._present(screen, g)
+
+    def _beam(self):
+        """Haz de foco a la resolución de la capa de luz: se abre y se apaga con la
+        distancia y no tiene bordes duros. Apunta hacia arriba desde el pie."""
+        surf = self.cache.get(("beam",))
+        if surf is None:
+            length = 170 * self.ls
+            w, h = int(length * 0.24) + 4, int(length) + 2
+            surf = pygame.Surface((w, h))
+            surf.fill((0, 0, 0))
+            for y in range(h):
+                d = (h - 1 - y) / (h - 1)  # 0 en el foco, 1 en la punta
+                along = (1 - d) ** 1.6 * min(1.0, d * 14)
+                half = 0.7 + 0.11 * d * length
+                for x in range(w):
+                    u = abs(x + 0.5 - w / 2) / half
+                    if u < 1:
+                        k = along * (1 - u * u) ** 1.5
+                        surf.set_at((x, y), (int(24 * k), int(30 * k), int(44 * k)))
+            self.cache[("beam",)] = surf
+        return surf
+
+    def _searchlights(self, g: Game, menu: bool) -> None:
+        """Dos focos antiaéreos barren el cielo despacio, tenues como en la niebla."""
+        beam = self._beam()
+        half = beam.get_height() / 2
+        for i, side, phase in ((1, 1, 0.0), (4, -1, 2.3)):
+            c = g.cities[i]
+            if not (menu or c.alive):
+                continue
+            angle = side * 0.2 + 0.34 * math.sin(g.frame * 0.0065 + phase)
+            spr = pygame.transform.rotozoom(beam, -math.degrees(angle), 1.0)
+            sx, sy = self.L(c.x + side * 2, c.y + 3)
+            cx, cy = sx + half * math.sin(angle), sy - half * math.cos(angle)
+            pos = (cx - spr.get_width() / 2, cy - spr.get_height() / 2)
+            self.light.blit(spr, pos, special_flags=pygame.BLEND_ADD)
+
+    def _trail_glow(self, g: Game) -> None:
+        """Halo tenue a lo largo de cada estela, más vivo cerca de la cabeza. Va el
+        primero en la capa de luz: sobre negro, pintar es sumar."""
+        enemy = self.palette.enemy
+        trails = [(m, enemy) for m in g.incoming if m is not None and m.kind == ICBM]
+        trails += [(a, HD_PLAYER) for a in g.abms]
+        for m, color in trails:
+            a, b = self.L(m.ox, m.oy), self.L(m.x, m.y)
+            mid = (a[0] + (b[0] - a[0]) * 0.6, a[1] + (b[1] - a[1]) * 0.6)
+            pygame.draw.aaline(self.light, scaled(color, 0.07), a, b)
+            pygame.draw.aaline(self.light, scaled(color, 0.14), mid, b)
+
+    def _sky_life(self, g: Game) -> None:
+        pf = self.pf
+        for x, y, phase, b in self.twinkles:
+            v = b * (0.55 + 0.45 * math.sin(phase + g.frame * 0.045))
+            px, py = self.P(x, y)
+            pf.fill(
+                (int(196 * v), int(202 * v), int(232 * v)), (int(px), int(py), 2, 2)
+            )
+            if b > 0.9 and v > 0.82:
+                arm = self.s * 1.1
+                glint = (int(120 * v), int(126 * v), int(150 * v))
+                pygame.draw.aaline(
+                    pf, glint, (px - arm, py + 1), (px + arm + 2, py + 1)
+                )
+                pygame.draw.aaline(
+                    pf, glint, (px + 1, py - arm), (px + 1, py + arm + 2)
+                )
+        for x0, y, speed, n in self.clouds:
+            x = (x0 + g.frame * speed) % (W + 90) - 45
+            spr = self._cloud(n)
+            cx, cy = self.P(x, y)
+            pf.blit(spr, (cx - spr.get_width() / 2, cy - spr.get_height() / 2))
+
+    def _ground(self, g: Game, menu: bool) -> None:
+        pf = self.pf
+        ground, y0 = self._terrain()
+        pf.blit(ground, (0, y0))
+        for x, y, r in self.scorches:
+            spr = self._scorch(r)
+            cx, cy = self.P(x, y)
+            pf.blit(spr, (cx - spr.get_width() / 2, cy - spr.get_height() / 2))
+        hidden = set(g.tally.cities) if g.tally is not None and not menu else set()
+        regen = set(g.regen_cities) if g.phase is Phase.REGEN else set()
+        for i, c in enumerate(g.cities):
+            if i in hidden:
+                continue
+            alive = menu or c.alive
+            pf.blit(self._city(i, alive), self.P(c.x - 9, c.y + 10))
+            base = c.y - 5
+            if alive:
+                self._add_light(c.x, c.y - 1, (34, 26, 14), 11)
+                ax, ah = self.cache.get(("antenna", i), (0.0, 8.0))
+                if (g.frame + i * 23) % 90 < 45:
+                    pygame.draw.circle(
+                        pf,
+                        (255, 74, 62),
+                        self.P(c.x + ax, base + ah),
+                        max(1.0, 0.32 * self.s),
+                    )
+                    self._add_light(c.x + ax, base + ah, (90, 20, 14), 2.4)
+                if i in regen:
+                    pulse = 0.5 + 0.5 * math.sin(g.frame * 0.25)
+                    self._add_light(c.x, c.y, scaled((70, 110, 60), pulse), 14)
+            else:
+                for ex, ey, ph in self.cache.get(("embers", i), ()):
+                    v = 0.5 + 0.5 * math.sin(ph + g.frame * 0.15)
+                    pos = self.P(c.x + ex, base + ey)
+                    pygame.draw.circle(
+                        pf,
+                        mix((120, 30, 10), (255, 150, 60), v),
+                        pos,
+                        max(1.0, 0.28 * self.s),
+                    )
+                    self._add_light(c.x + ex, base + ey, scaled((90, 40, 14), v), 2.4)
+        for s in g.silos:
+            self._silo(g, s, menu)
+
+    def _scorch(self, r: float):
+        key = ("scorch", int(r))
+        surf = self.cache.get(key)
+        if surf is None:
+            disc = soft_disc(
+                r * self.s,
+                ((0, (8, 6, 6, 170)), (0.6, (14, 10, 8, 100)), (1, (20, 14, 10, 0))),
+            )
+            size = (disc.get_width(), max(1, int(disc.get_height() * 0.38)))
+            surf = self.cache[key] = pygame.transform.smoothscale(disc, size)
+        return surf
+
+    def _silo(self, g: Game, s: Silo, menu: bool) -> None:
+        pf = self.pf
+        if not (menu or s.alive):
+            pf.blit(self._crater(), self.P(s.x - 7, s.y + 2.5))
+            for n in range(4):
+                v = 0.5 + 0.5 * math.sin(g.frame * 0.13 + n * 1.7 + s.x)
+                ex, ey = s.x - 4 + n * 2.6, s.y + 0.6
+                pygame.draw.circle(
+                    pf,
+                    mix((120, 30, 10), (255, 140, 50), v),
+                    self.P(ex, ey),
+                    max(1.0, 0.3 * self.s),
+                )
+                self._add_light(ex, ey, scaled((90, 40, 14), v), 2.6)
+            return
+        bx, by = s.x, s.y + 2.2
+        angle = 0.0
+        if not menu and g.phase in (Phase.PLAY, Phase.INTRO, Phase.DEMO):
+            dx, dy = g.cursor[0] - bx, g.cursor[1] - by
+            angle = clamp(math.atan2(dx, max(0.5, dy)), -1.3, 1.3)
+        ux, uy = math.sin(angle), math.cos(angle)
+        nx, ny = uy, -ux
+        tip = (bx + ux * 5.2, by + uy * 5.2)
+        quad = [
+            (bx + nx * 0.7, by + ny * 0.7),
+            (tip[0] + nx * 0.56, tip[1] + ny * 0.56),
+            (tip[0] - nx * 0.56, tip[1] - ny * 0.56),
+            (bx - nx * 0.7, by - ny * 0.7),
+        ]
+        pts = [self.P(*q) for q in quad]
+        pygame.draw.polygon(pf, (124, 130, 146), pts)
+        pygame.draw.aalines(pf, (190, 198, 214), True, pts)
+        pf.blit(self._bunker(), self.P(s.x - 6, s.y + 6))
+        if menu or g.infinite or s.abms > 3:
+            color = (90, 255, 150)
+        else:
+            color = (255, 190, 70) if s.abms else (255, 80, 70)
+        lamp = (s.x, s.y + 4.9)
+        pygame.draw.circle(pf, color, self.P(*lamp), max(1.0, 0.32 * self.s))
+        self._add_light(*lamp, scaled(color, 0.3), 2.0)
+        for mx, _, life in self.muzzles:
+            if abs(mx - s.x) < 1:
+                glow = self._glow((150, 210, 255), 1.6 * life / 8 + 0.4)
+                cx, cy = self.P(*tip)
+                pf.blit(glow, (cx - glow.get_width() / 2, cy - glow.get_height() / 2))
+                self._add_light(*tip, scaled((120, 170, 210), life / 8), 6)
+        playing = g.phase in (Phase.PLAY, Phase.INTRO, Phase.DEMO, Phase.TALLY)
+        if not menu and not g.infinite and playing:
+            col = HD_TEXT if s.abms > 3 else HD_WARM if s.abms else HD_DANGER
+            self.put(pf, str(s.abms), 4.6 * self.s, col, self.P(s.x, s.y - 6.2))
+
+    def _smoke(self) -> None:
+        pf = self.pf
+        for x, y, _, _, life, ttl, size, alpha in self.puffs:
+            k = life / ttl
+            spr = self._puff(size * (1.6 - 0.6 * k))
+            spr.set_alpha(int(alpha * k))
+            cx, cy = self.P(x, y)
+            pf.blit(spr, (cx - spr.get_width() / 2, cy - spr.get_height() / 2))
+
+    def _field(self, g: Game) -> None:
+        enemy = self.palette.enemy
+        for m in g.incoming:
+            if m is not None and m.kind == ICBM:
+                self._trail(m, enemy)
+        for a in g.abms:
+            self._trail(a, HD_PLAYER)
+            self._marker(a.tx, a.ty, g.frame)
+        for x, y, age in self.rings:
+            f = age / 18
+            col = mix(self._sky_at(y), (200, 236, 255), 0.6 * (1 - f))
+            ring_line(self.pf, col, self.P(x, y), (4 + age * 1.4) * self.s)
+        self._explosions(g)
+        for m in g.incoming:
+            if m is not None and m.kind == SMART:
+                self._bomb(g, m)
+        if g.flier is not None:
+            self._flier_draw(g, g.flier)
+        if self.juice:
+            self._particles()
+        if g.cursor_visible:
+            self._crosshair(g)
+
+    def _trail(self, m: Missile, color) -> None:
+        pf = self.pf
+        x0, y0, x1, y1 = m.ox, m.oy, m.x, m.y
+        prev = self.P(x0, y0)
+        for k in range(1, 7):
+            f = k / 6
+            y = y0 + (y1 - y0) * f
+            cur = self.P(x0 + (x1 - x0) * f, y)
+            pygame.draw.aaline(
+                pf, mix(self._sky_at(y), color, 0.12 + 0.88 * f**1.7), prev, cur
+            )
+            prev = cur
+        dx, dy = x1 - x0, y1 - y0
+        n = math.hypot(dx, dy) or 1.0
+        back = min(10.0, n)
+        tail = self.P(x1 - dx / n * back, y1 - dy / n * back)
+        ox, oy = dy / n * 0.8, dx / n * 0.8
+        pygame.draw.aaline(
+            pf, color, (tail[0] + ox, tail[1] + oy), (prev[0] + ox, prev[1] + oy)
+        )
+        glow = self._glow(color, 1.3)
+        pf.blit(glow, (prev[0] - glow.get_width() / 2, prev[1] - glow.get_height() / 2))
+        self._add_light(x1, y1, scaled(color, 0.4), 3.5)
+
+    def _marker(self, tx: float, ty: float, frame: int) -> None:
+        x, y = self.P(tx, ty)
+        r = (1.8 + 0.4 * math.sin(frame * 0.3)) * self.s
+        ring_line(self.pf, HD_PLAYER, (x, y), r)
+        d = r * 0.55
+        pygame.draw.aaline(self.pf, HD_PLAYER, (x - d, y - d), (x + d, y + d))
+        pygame.draw.aaline(self.pf, HD_PLAYER, (x - d, y + d), (x + d, y - d))
+
+    def _explosions(self, g: Game) -> None:
+        pf = self.pf
+        for e in g.explosions:
+            if e is None or not e.step:
+                continue
+            prev = e.previous_radius
+            r = prev + (e.radius - prev) * clamp(
+                (g.frame - e.updated + 1) / 5, 0.0, 1.0
+            )
+            if r < 0.3:
+                continue
+            temp = 0 if e.step < 9 else 1 if e.step < 18 else 2
+            cx, cy = self.P(e.x, e.y)
+            if r > 2:  # bolsas de fuego alrededor: forma irregular y viva
+                seed = (e.x * 37 + e.y * 11) % 100 / 16
+                for j in range(3):
+                    a = seed + j * 2.094 + g.frame * 0.03
+                    blob = self._fireball(
+                        min(2, temp + 1) if j == 2 else temp, r * 0.55
+                    )
+                    bx, by = (
+                        cx + math.cos(a) * r * 0.42 * self.s,
+                        cy + math.sin(a) * r * 0.42 * self.s,
+                    )
+                    pf.blit(
+                        blob, (bx - blob.get_width() / 2, by - blob.get_height() / 2)
+                    )
+            spr = self._fireball(temp, r)
+            pf.blit(spr, (cx - spr.get_width() / 2, cy - spr.get_height() / 2))
+            level = max(1, 8 - e.step // 4)
+            self._add_light(e.x, e.y, scaled((150, 92, 44), level / 8), r * 3.2)
+
+    def _bomb(self, g: Game, m: Missile) -> None:
+        pf = self.pf
+        trail = self.bomb_trails.get(m.serial, [])
+        for n, (tx, ty) in enumerate(trail):
+            f = (n + 1) / (len(trail) + 1)
+            col = mix(self._sky_at(ty), (196, 96, 255), 0.55 * f)
+            pygame.draw.circle(pf, col, self.P(tx, ty), max(1.0, 1.3 * self.s * f))
+        cx, cy = self.P(m.x, m.y)
+        rot = g.frame * 0.15 + m.serial
+        pts = []
+        for j in range(8):
+            a = rot + j * math.pi / 4
+            rr = (3.6 if j % 2 == 0 else 1.4) * self.s
+            pts.append((cx + math.cos(a) * rr, cy + math.sin(a) * rr))
+        pygame.draw.polygon(pf, (150, 70, 222), pts)
+        pygame.draw.aalines(pf, (232, 176, 255), True, pts)
+        pygame.draw.circle(pf, (255, 232, 255), (cx, cy), max(1.0, 1.0 * self.s))
+        self._add_light(m.x, m.y, (90, 36, 120), 7)
+
+    def _flier_draw(self, g: Game, f: Flier) -> None:
+        pf = self.pf
+        spr = self._flier(f.kind, f.direction < 0)
+        cx, cy = self.P(f.x, f.y)
+        pf.blit(spr, (cx - spr.get_width() / 2, cy - spr.get_height() / 2))
+        dot = max(1.0, 0.32 * self.s)
+        if f.kind == BOMBER:
+            for side, color in ((1, (255, 72, 60)), (-1, (80, 255, 124))):
+                wx, wy = f.x - 0.5 * f.direction, f.y + side * 4.1
+                pygame.draw.circle(pf, color, self.P(wx, wy), dot)
+                self._add_light(wx, wy, scaled(color, 0.25), 2.0)
+            if g.frame % 50 < 4:
+                tail = (f.x - 7 * f.direction, f.y)
+                pygame.draw.circle(pf, (255, 255, 255), self.P(*tail), dot * 1.3)
+                self._add_light(*tail, (110, 110, 110), 3)
+            self._add_light(f.x - 6 * f.direction, f.y, (90, 50, 20), 3)
+        else:
+            if g.frame % 60 < 30:
+                pygame.draw.circle(pf, (255, 80, 70), self.P(f.x, f.y + 3.7), dot)
+                self._add_light(f.x, f.y + 3.7, (100, 24, 18), 2.4)
+            self._add_light(f.x, f.y, (36, 46, 76), 6)
+
+    def _particles(self) -> None:
+        pf = self.pf
+        for x, y, _, _, life, ttl, kind, color, x0, y0 in self.particles:
+            k = life / ttl
+            here = self.P(x, y)
+            if kind == SPARK:
+                pygame.draw.aaline(pf, ramp(SPARK_RAMP, 1 - k), self.P(x0, y0), here)
+                if k > 0.5:
+                    self._add_light(x, y, scaled((120, 80, 40), k), 1.6)
+            elif kind == DEBRIS:
+                pygame.draw.circle(pf, color, here, max(1.0, 0.45 * self.s))
+            else:
+                pygame.draw.circle(
+                    pf,
+                    mix((255, 90, 30), (255, 210, 110), k),
+                    here,
+                    max(1.0, 0.3 * self.s),
+                )
+                self._add_light(x, y, scaled((110, 50, 20), k), 1.8)
+
+    def _crosshair(self, g: Game) -> None:
+        pf = self.pf
+        x, y = self.P(*g.cursor)
+        r = 3.4 * self.s
+        ring_line(pf, HD_PLAYER, (x, y), r)
+        rot = g.frame * 0.04
+        for j in range(4):
+            a = rot + j * math.pi / 2
+            ca, sa = math.cos(a), math.sin(a)
+            pygame.draw.aaline(
+                pf,
+                HD_PLAYER,
+                (x + ca * r * 0.55, y + sa * r * 0.55),
+                (x + ca * r * 1.45, y + sa * r * 1.45),
+            )
+        pygame.draw.circle(pf, (220, 244, 255), (x, y), max(1.0, 0.35 * self.s))
+        self._add_light(*g.cursor, (20, 50, 70), 4)
+
+    # --- título, fases y paneles ---------------------------------------------------
+
+    def _title_word(self, word: str, px: float):
+        f = self.font(px)
+        chars = [f.render(ch, True, (255, 255, 255)) for ch in word]
+        gap = px * 0.06
+        width = sum(c.get_width() for c in chars) + gap * (len(chars) - 1)
+        surf = pygame.Surface(
+            (int(width) + 2, max(c.get_height() for c in chars)), pygame.SRCALPHA
+        )
+        x = 0.0
+        for c in chars:
+            surf.blit(c, (round(x), 0))
+            x += c.get_width() + gap
+        stops = ((0, (255, 228, 172)), (0.5, (255, 152, 76)), (1, (192, 62, 42)))
+        surf.blit(
+            gradient(surf.get_size(), stops).convert_alpha(),
+            (0, 0),
+            special_flags=pygame.BLEND_RGBA_MULT,
+        )
+        return surf
+
+    def _title_art(self, g: Game) -> None:
+        if self.title_layers is None or g.timer < self.title_clock:
+            rw, rh = self.pf.get_size()
+            text = pygame.Surface((rw, rh), pygame.SRCALPHA)
+            for word, y in (("MISSILE", 147), ("COMMAND", 99)):
+                surf = self._title_word(word, rh * 0.155)
+                text.blit(surf, surf.get_rect(center=self.P(128, y)))
+            halo = pygame.Surface((rw, rh))
+            halo.fill((0, 0, 0))
+            halo.blit(text, (0, 0))
+            halo = pygame.transform.smoothscale(
+                pygame.transform.smoothscale(halo, (rw // 10, rh // 10)), (rw, rh)
+            )
+            halo.fill((150, 150, 150), special_flags=pygame.BLEND_MULT)
+            self.title_layers = (text, halo)
+        self.title_clock = g.timer
+        if g.timer < 520:
+            self.pf.blit(self.title_layers[1], (0, 0), special_flags=pygame.BLEND_ADD)
+            self.pf.blit(self.title_layers[0], (0, 0))
+
+    def _dim(self, alpha: int) -> None:
+        key = ("dim", alpha)
+        surf = self.cache.get(key)
+        if surf is None:
+            surf = pygame.Surface(self.pf.get_size(), pygame.SRCALPHA)
+            surf.fill((4, 5, 10, alpha))
+            self.cache[key] = surf
+        self.pf.blit(surf, (0, 0))
+
+    def _panel(self, rect, alpha: int = 215) -> None:
+        surf = pygame.Surface(rect.size, pygame.SRCALPHA)
+        radius = int(min(rect.w, rect.h) * 0.06)
+        pygame.draw.rect(
+            surf, (10, 12, 22, alpha), surf.get_rect(), border_radius=radius
+        )
+        width = max(1, int(self.s * 0.35))
+        pygame.draw.rect(
+            surf, (*HD_PLAYER, 110), surf.get_rect(), width=width, border_radius=radius
+        )
+        self.pf.blit(surf, rect)
+
+    def _phase_text(self, g: Game) -> None:
+        handler = {
+            Phase.INTRO: self._intro,
+            Phase.TALLY: self._tally,
+            Phase.REGEN: self._regen,
+            Phase.PLAYER_OUT: self._player_out,
+            Phase.THE_END: self._the_end_text,
+            Phase.DEMO: self._demo,
+            Phase.TITLE: self._title_text,
+            Phase.SCORES: self._scores,
+            Phase.INITIALS: self._initials,
+            Phase.STATS: self._stats,
+        }.get(g.phase)
+        if handler is not None:
+            handler(g)
+
+    def _fade(self, t: int, total: int, edge: int = 16) -> int:
+        return int(
+            255 * clamp(t / edge, 0.0, 1.0) * clamp((total - t) / edge, 0.0, 1.0)
+        )
+
+    def _intro(self, g: Game) -> None:
+        pf, (rw, rh) = self.pf, self.pf.get_size()
+        a = self._fade(g.timer, INTRO_FRAMES)
+        y = rh * 0.34
+        if g.n_players > 1:
+            self.put(
+                pf,
+                self.ht("player", n=g.current + 1),
+                rh * 0.04,
+                HD_PLAYER,
+                (rw / 2, y - rh * 0.09),
+                alpha=a,
+            )
+        self.put(pf, self.t("wave", n=g.wave), rh * 0.1, HD_WARM, (rw / 2, y), alpha=a)
+        self.put(
+            pf,
+            self.ht("points", n=multiplier(g.wave)),
+            rh * 0.045,
+            HD_TEXT,
+            (rw / 2, y + rh * 0.075),
+            alpha=a,
+        )
+        if g.wave <= 3:
+            self.put(
+                pf,
+                self.ht("defend"),
+                rh * 0.04,
+                HD_PLAYER,
+                (rw / 2, self.P(0, 64)[1]),
+                alpha=a,
+            )
+            bob = math.sin(g.frame * 0.15) * 1.2
+            for c in g.cities:
+                if c.alive:
+                    x, y0 = self.P(c.x, c.y + 15 + bob)
+                    d = 1.6 * self.s
+                    pygame.draw.aaline(pf, HD_PLAYER, (x - d, y0 - d), (x, y0))
+                    pygame.draw.aaline(pf, HD_PLAYER, (x, y0), (x + d, y0 - d))
+
+    def _tally(self, g: Game) -> None:
+        t = g.tally
+        if t is None:
+            return
+        pf, (rw, rh) = self.pf, self.pf.get_size()
+        self.put(
+            pf,
+            self.ht("cleared", n=g.wave),
+            rh * 0.07,
+            HD_WARM,
+            (rw / 2, rh * 0.25),
+            alpha=self._fade(g.timer, 10**6, 12),
+        )
+        rows = []
+        if not g.infinite:
+            rows.append(("abm_bonus", t.abm_points, t.abms, None))
+        if t.cities or t.stage >= 1:
+            rows.append(("city_bonus", t.city_points, len(t.cities), t.cities))
+        for n, (key, points, count, cities) in enumerate(rows):
+            y = rh * (0.4 + n * 0.14)
+            self.put(
+                pf,
+                self.ht(key),
+                rh * 0.03,
+                HD_MUTED,
+                (rw * 0.08, y - rh * 0.045),
+                "midleft",
+            )
+            self.put(pf, str(points), rh * 0.055, HD_TEXT, (rw * 0.92, y), "midright")
+            if cities is None:
+                for j in range(count):
+                    x = rw * 0.08 + j * rh * 0.019
+                    pygame.draw.line(
+                        pf,
+                        HD_PLAYER,
+                        (x, y + rh * 0.018),
+                        (x, y - rh * 0.012),
+                        max(1, int(self.s * 0.5)),
+                    )
+                    pygame.draw.circle(
+                        pf,
+                        (220, 244, 255),
+                        (x, y - rh * 0.014),
+                        max(1.0, self.s * 0.35),
+                    )
+            else:
+                for j, i in enumerate(cities):
+                    icon = self._mini_city(i)
+                    pf.blit(
+                        icon,
+                        icon.get_rect(
+                            midleft=(rw * 0.08 + j * icon.get_width() * 1.05, y)
+                        ),
+                    )
+
+    def _mini_city(self, i: int):
+        key = ("mini", i, self.palette.index)
+        surf = self.cache.get(key)
+        if surf is None:
+            big = self._city(i, True)
+            surf = pygame.transform.smoothscale(
+                big, (int(big.get_width() * 0.75), int(big.get_height() * 0.75))
+            )
+            self.cache[key] = surf
+        return surf
+
+    def _panel_city(self, i: int, alive: bool, width: float):
+        """La misma ciudad del campo, en miniatura para el panel; las caídas, en ruinas."""
+        w = max(8, int(width))
+        key = ("panel_city", i, alive, w, self.palette.index)
+        surf = self.cache.get(key)
+        if surf is None:
+            big = self._city(i, alive)
+            h = max(6, round(w * big.get_height() / big.get_width()))
+            surf = self.cache[key] = pygame.transform.smoothscale(big, (w, h))
+        return surf
+
+    def _regen(self, g: Game) -> None:
+        pf, (rw, rh) = self.pf, self.pf.get_size()
+        a = int(160 + 95 * math.sin(g.timer * 0.18))
+        self.put(
+            pf,
+            self.t("bonus_city"),
+            rh * 0.075,
+            (140, 255, 170),
+            (rw / 2, rh * 0.3),
+            alpha=a,
+        )
+
+    def _player_out(self, g: Game) -> None:
+        pf, (rw, rh) = self.pf, self.pf.get_size()
+        a = self._fade(g.timer, REGEN_FRAMES)
+        self.put(
+            pf,
+            self.ht("player", n=g.current + 1),
+            rh * 0.045,
+            HD_PLAYER,
+            (rw / 2, rh * 0.3),
+            alpha=a,
+        )
+        self.put(
+            pf, self.t("game_over"), rh * 0.09, HD_WARM, (rw / 2, rh * 0.39), alpha=a
+        )
+
+    def _the_end_fire(self, g: Game) -> None:
+        t = g.timer
+        grow = clamp(t / 50, 0.0, 1.0)
+        fade = clamp((THE_END_FRAMES - t) / 60, 0.0, 1.0)
+        a = 120 * grow / 255  # velo rojizo: mezcla con (20, 4, 2) al 47 % como mucho
+        if a > 0:
+            k = int(255 * (1 - a))
+            self.pf.fill((k, k, k), special_flags=pygame.BLEND_MULT)
+            self.pf.fill(
+                (int(20 * a), int(4 * a), int(2 * a)), special_flags=pygame.BLEND_ADD
+            )
+        r = 118 * grow * fade
+        if r > 1:
+            base = self.cache.get(("end_fire",))
+            if base is None:
+                base = self.cache[("end_fire",)] = soft_disc(160, FIRE_STOPS[0])
+            size = int(r * 2 * self.s)
+            spr = pygame.transform.smoothscale(base, (size, size))
+            cx, cy = self.P(128, 118)
+            self.pf.blit(spr, (cx - size / 2, cy - size / 2))
+            self._add_light(128, 118, (120, 60, 24), r * 1.6)
+
+    def _the_end_text(self, g: Game) -> None:
+        if g.timer > 28:
+            a = self._fade(g.timer - 28, THE_END_FRAMES - 60, 24)
+            rh = self.pf.get_height()
+            self.put(
+                self.pf,
+                self.t("the_end"),
+                rh * 0.17,
+                (44, 10, 6),
+                self.P(128, 118),
+                alpha=a,
+                shadow=False,
+            )
+
+    def _demo(self, g: Game) -> None:
+        pf, (rw, rh) = self.pf, self.pf.get_size()
+        self.put(pf, self.ht("demo"), rh * 0.03, HD_MUTED, (rw / 2, rh * 0.075))
+        if (g.frame // 30) % 2:
+            self.put(pf, self.t("press"), rh * 0.04, HD_TEXT, (rw / 2, rh * 0.13))
+
+    def _title_text(self, g: Game) -> None:
+        pf, (rw, rh) = self.pf, self.pf.get_size()
+        if g.timer > 30:
+            self.put(pf, self.t("tribute"), rh * 0.04, HD_PLAYER, (rw / 2, rh * 0.64))
+        if (g.frame // 30) % 2:
+            self.put(pf, self.t("press"), rh * 0.045, HD_TEXT, (rw / 2, rh * 0.72))
+        else:
+            self.put(pf, self.t("two"), rh * 0.036, HD_MUTED, (rw / 2, rh * 0.72))
+        key = "ammo_on" if g.infinite else "ammo_off"
+        self.put(
+            pf,
+            self.ht(key),
+            rh * 0.03,
+            HD_WARM if g.infinite else HD_MUTED,
+            (rw / 2, rh * 0.78),
+        )
+
+    def _scores(self, g: Game) -> None:
+        pf, (rw, rh) = self.pf, self.pf.get_size()
+        self._dim(150)
+        self.put(pf, self.t("high"), rh * 0.075, HD_WARM, (rw / 2, rh * 0.16))
+        table = self.ht("table_inf" if g.infinite else "table_arcade")
+        self.put(pf, table, rh * 0.032, HD_MUTED, (rw / 2, rh * 0.225))
+        medals = ((255, 214, 110), (214, 218, 230), (220, 156, 100))
+        for i, (name, score) in enumerate(g.high_scores):
+            y = rh * (0.33 + i * 0.085)
+            color = HD_WARM if i == g.new_rank else HD_TEXT
+            self.put(
+                pf,
+                str(i + 1),
+                rh * 0.05,
+                medals[i] if i < 3 else HD_MUTED,
+                (rw * 0.22, y),
+            )
+            self.put(pf, name, rh * 0.05, color, (rw * 0.34, y), "midleft")
+            self.put(pf, str(score), rh * 0.05, color, (rw * 0.8, y), "midright")
+        if (g.frame // 30) % 2:
+            self.put(pf, self.t("press"), rh * 0.04, HD_TEXT, (rw / 2, rh * 0.84))
+
+    def _initials(self, g: Game) -> None:
+        pf, (rw, rh) = self.pf, self.pf.get_size()
+        self._dim(150)
+        if g.n_players > 1:
+            self.put(
+                pf,
+                self.ht("player", n=g.entry_player + 1),
+                rh * 0.04,
+                HD_PLAYER,
+                (rw / 2, rh * 0.1),
+            )
+        score = g.players[g.entry_player].score if g.players else g.score
+        self.put(pf, self.ht("new_high"), rh * 0.07, HD_WARM, (rw / 2, rh * 0.18))
+        self.put(pf, str(score), rh * 0.085, HD_TEXT, (rw / 2, rh * 0.28))
+        box, gap = rh * 0.13, rh * 0.04
+        x0 = rw / 2 - 1.5 * box - gap
+        for i, letter in enumerate(g.entry):
+            rect = pygame.Rect(
+                int(x0 + i * (box + gap)), int(rh * 0.38), int(box), int(box * 1.15)
+            )
+            current = i == g.entry_pos
+            pygame.draw.rect(pf, (14, 16, 28), rect, border_radius=int(box * 0.12))
+            pulse = 2 + (g.frame // 8) % 2 if current else 1
+            border = HD_PLAYER if current else (70, 80, 102)
+            pygame.draw.rect(
+                pf,
+                border,
+                rect,
+                width=max(1, int(pulse * self.s * 0.3)),
+                border_radius=int(box * 0.12),
+            )
+            ch = INITIALS_ALPHABET[letter]
+            self.put(
+                pf,
+                ch if ch != " " else "_",
+                box * 0.8,
+                HD_PLAYER if current else HD_TEXT,
+                rect.center,
+            )
+        for n, key in enumerate(("enter", "change", "select")):
+            self.put(
+                pf,
+                self.t(key),
+                rh * 0.034,
+                HD_TEXT if n == 0 else HD_MUTED,
+                (rw / 2, rh * (0.64 + n * 0.055)),
+            )
+
+    def _stats(self, g: Game) -> None:
+        pf, (rw, rh) = self.pf, self.pf.get_size()
+        self._dim(150)
+        player = (
+            g.players[min(g.stats_index, len(g.players) - 1)] if g.players else None
+        )
+        s = player.stats if player else g.stats
+        score = player.score if player else g.score
+        minutes, seconds = divmod(s.frames // FPS, 60)
+        rows = (
+            ("st_waves", s.waves), ("st_score", score), ("st_shots", s.shots),
+            ("st_kills", s.kills), ("st_icbms", s.icbms), ("st_smarts", s.smarts),
+            ("st_fliers", s.fliers), ("st_chain", s.best_chain), ("st_mirvs", s.mirvs),
+            ("st_lost", s.cities_lost), ("st_bonus", s.bonus_cities),
+            ("st_ratio", f"{s.kills / s.shots:.2f}" if s.shots else "-"),
+            ("st_time", f"{minutes}:{seconds:02d}"),
+        )  # fmt: skip
+        panel = pygame.Rect(
+            int(rw * 0.08), int(rh * 0.06), int(rw * 0.84), int(rh * 0.86)
+        )
+        self._panel(panel)
+        title = (
+            self.ht("player", n=g.stats_index + 1)
+            if g.n_players > 1
+            else self.t("report")
+        )
+        self.put(pf, title, rh * 0.055, HD_WARM, (rw / 2, panel.y + rh * 0.06))
+        for n, (key, value) in enumerate(rows):
+            y = panel.y + rh * (0.14 + n * 0.052)
+            self.put(
+                pf,
+                self.t(key).strip(),
+                rh * 0.032,
+                HD_MUTED,
+                (
+                    panel.x
+                    + rh * 0.05
+                    + (rh * 0.03 if self.t(key).startswith(" ") else 0),
+                    y,
+                ),
+                "midleft",
+            )
+            self.put(
+                pf,
+                str(value),
+                rh * 0.036,
+                HD_TEXT,
+                (panel.right - rh * 0.05, y),
+                "midright",
+            )
+        if g.timer > FPS and (g.frame // 30) % 2:
+            self.put(
+                pf,
+                self.t("press_fire"),
+                rh * 0.036,
+                HD_WARM,
+                (rw / 2, panel.bottom - rh * 0.04),
+            )
+
+    def _popups(self) -> None:
+        rh = self.pf.get_height()
+        for x, y, text, life, ttl, big in self.popups:
+            a = min(1.0, life / (ttl * 0.4))
+            if big:
+                self.put(self.pf, text, rh * 0.05, HD_WARM, self.P(x, y), alpha=255 * a)
+            else:
+                self.put(
+                    self.pf,
+                    text,
+                    rh * 0.026,
+                    (226, 228, 236),
+                    self.P(x, y),
+                    alpha=210 * a,
+                )
+
+    def _hud_top(self, g: Game) -> None:
+        pf, (rw, rh) = self.pf, self.pf.get_size()
+        px, y = rh * 0.04, rh * 0.035
+        scores = g.player_scores()
+        for i, value in enumerate(scores):
+            active = g.attract or len(scores) == 1 or i == g.current
+            pos, anchor = (
+                ((rw * 0.03, y), "midleft") if i == 0 else ((rw * 0.97, y), "midright")
+            )
+            self.put(pf, str(value), px, HD_TEXT if active else HD_MUTED, pos, anchor)
+        best = max([g.high_scores[0][1] if g.high_scores else 0] + scores)
+        self.put(pf, str(best), px, HD_WARM, (rw / 2, y))
+        if (
+            len(scores) == 1
+            and not g.attract
+            and g.phase in (Phase.PLAY, Phase.INTRO, Phase.TALLY)
+        ):
+            self.put(
+                pf,
+                self.t("wave", n=g.wave),
+                px * 0.8,
+                HD_MUTED,
+                (rw * 0.97, y),
+                "midright",
+            )
+
+    def _overlay(self, kind: str) -> None:
+        pf, (rw, rh) = self.pf, self.pf.get_size()
+        small = pygame.transform.smoothscale(pf, (max(1, rw // 10), max(1, rh // 10)))
+        pf.blit(pygame.transform.smoothscale(small, (rw, rh)), (0, 0))
+        self._dim(110)
+        title, rows = (HELP_ROWS if kind == "help" else PAUSE_ROWS)[self.lang]
+        px = rh * (0.036 if kind == "help" else 0.05)
+        line = px * 1.3
+        f = self.font(px)
+        col = max(f.size(k)[0] for k, _ in rows) + px * 1.2
+        width = col + max(f.size(v)[0] for _, v in rows) + px * 2
+        rect = pygame.Rect(0, 0, int(width), int(line * (len(rows) + 2) + px))
+        rect.center = (rw // 2, rh // 2)
+        self._panel(rect, 230)
+        self.put(
+            pf, title, px * 1.15, HD_WARM, (rect.x + px, rect.y + px * 0.6), "topleft"
+        )
+        for n, (key, value) in enumerate(rows):
+            y = rect.y + px * 0.6 + line * (n + 2)
+            self.put(pf, key, px, HD_PLAYER, (rect.x + px, y), "topleft")
+            self.put(pf, value, px, HD_TEXT, (rect.x + px + col, y), "topleft")
+
+    def _side_panels(self, screen, g: Game) -> None:
+        sw, sh = screen.get_size()
+        r = self.rect
+        key = ("panels", sw, sh)
+        bg = self.cache.get(key)
+        if bg is None:
+            bg = gradient((sw, sh), ((0, (15, 16, 27)), (1, (6, 7, 12)))).convert()
+            for x in (r.x - 2, r.right):
+                pygame.draw.line(bg, (40, 54, 82), (x, 0), (x, sh), 2)
+            self.cache[key] = bg
+        screen.blit(bg, (0, 0), (0, 0, r.x, sh))  # solo las franjas: el campo va encima
+        screen.blit(bg, (r.right, 0), (r.right, 0, sw - r.right, sh))
+        lab, val = sh * 0.024, sh * 0.056
+        lx, rx = r.x / 2, r.right + (sw - r.right) / 2
+
+        def block(x, y, label, value, color=HD_TEXT, size=val):
+            self.put(screen, label, lab, HD_MUTED, (x, y))
+            self.put(screen, value, size, color, (x, y + lab * 1.8))
+
+        scores = g.player_scores()
+        y = sh * 0.1
+        if len(scores) == 1:
+            block(lx, y, self.ht("score"), str(scores[0]))
+        else:
+            for i, value in enumerate(scores):
+                active = not g.attract and i == g.current
+                block(
+                    lx,
+                    y,
+                    self.ht("player", n=i + 1),
+                    str(value),
+                    HD_PLAYER if active else HD_MUTED,
+                )
+                y += sh * 0.13
+        best = max([g.high_scores[0][1] if g.high_scores else 0] + scores)
+        block(lx, sh * 0.42, self.ht("hi"), str(best), HD_WARM, val * 0.8)
+        if not g.attract:
+            y = sh * 0.1
+            block(rx, y, self.ht("wave_label"), str(g.wave))
+            y += sh * 0.14
+            block(
+                rx,
+                y,
+                self.ht("mult_label"),
+                f"×{multiplier(g.wave)}",
+                HD_WARM,
+                val * 0.8,
+            )
+            y += sh * 0.14
+            head = self.put(screen, self.ht("cities_label"), lab, HD_MUTED, (rx, y))
+            if g.reserve:
+                self.put(
+                    screen,
+                    f"+{g.reserve}",
+                    lab,
+                    HD_WARM,
+                    (head.right + lab * 0.5, y),
+                    "midleft",
+                )
+            iw = min((sw - r.right) * 0.24, sh * 0.05)
+            for i, c in enumerate(g.cities):  # las seis ciudades en dos filas de tres
+                icon = self._panel_city(i, c.alive, iw)
+                col, row = i % 3, i // 3
+                pos = (
+                    rx + (col - 1) * iw * 1.14,
+                    y + lab * 1.2 + row * icon.get_height() * 1.06,
+                )
+                screen.blit(icon, icon.get_rect(midtop=(round(pos[0]), round(pos[1]))))
+            y += sh * 0.15
+            ammo = (
+                self.ht("ammo_inf")
+                if g.infinite
+                else "   ".join(str(s.abms) for s in g.silos)
+            )
+            block(rx, y, self.ht("ammo_label"), ammo, HD_PLAYER, val * 0.55)
+            y += sh * 0.13
+            block(
+                rx,
+                y,
+                self.ht("chain_label"),
+                str(g.stats.best_chain),
+                HD_TEXT,
+                val * 0.7,
+            )
+        else:
+            key = "table_inf" if g.infinite else "table_arcade"
+            self.put(
+                screen,
+                self.ht(key),
+                lab,
+                HD_WARM if g.infinite else HD_MUTED,
+                (rx, sh * 0.12),
+            )
+        self.put(
+            screen, self.ht("help_hint"), lab * 0.9, (96, 106, 130), (rx, sh * 0.95)
+        )
+
+    def _present(self, screen, g: Game) -> None:
+        r = self.rect
+        ox = oy = 0
+        if self.juice and self.shake > 0.25:
+            amp = self.shake * self.unit
+            ox, oy = (
+                round(self.rng.uniform(-amp, amp)),
+                round(self.rng.uniform(-amp, amp)),
+            )
+        if self.side:
+            self._side_panels(screen, g)
+        if ox or oy or not self.side:  # el temblor destapa el borde del campo
+            screen.fill((5, 6, 10), r if self.side else None)
+        self._blit_field(screen, r.move(ox, oy))
+        if self.juice and self.flash > 0.02:
+            screen.fill(
+                scaled(self.flash_rgb, self.flash), r, special_flags=pygame.BLEND_ADD
+            )
+        if self.toast_frames:
+            px = r.h * 0.032
+            body = self.label(self.t(self.toast), px, HD_TEXT, False)
+            pill = body.get_rect(midtop=(r.centerx, r.y + px * 1.4)).inflate(
+                px * 1.4, px * 0.7
+            )
+            box = pygame.Surface(pill.size, pygame.SRCALPHA)
+            pygame.draw.rect(
+                box, (10, 12, 22, 220), box.get_rect(), border_radius=pill.h // 2
+            )
+            pygame.draw.rect(
+                box,
+                (*HD_PLAYER, 140),
+                box.get_rect(),
+                width=1,
+                border_radius=pill.h // 2,
+            )
+            screen.blit(box, pill)
+            screen.blit(body, body.get_rect(center=pill.center))
+
+    def _blit_field(self, screen, dest) -> None:
+        """El campo en pantalla: tal cual, duplicando píxeles si el factor es entero
+        (en 4K es justo 2: exacto y cuatro veces más barato) o con escalado suave."""
+        pw, ph = self.pf.get_size()
+        r = self.rect
+        if (pw, ph) == r.size:
+            screen.blit(self.pf, dest)
+            return
+        exact = r.w % pw == 0 and r.h % ph == 0 and r.w // pw == r.h // ph
+        scale = pygame.transform.scale if exact else pygame.transform.smoothscale
+        if screen.get_rect().contains(dest):  # escalar directamente en la pantalla
+            scale(self.pf, r.size, screen.subsurface(dest))
+        else:
+            screen.blit(scale(self.pf, r.size), dest)
+
+
+def ring_line(surface, color, center, radius: float) -> None:
+    """Circunferencia suavizada; con pygame clásico, sin suavizar."""
+    if hasattr(pygame.draw, "aacircle"):
+        pygame.draw.aacircle(surface, color, center, radius, 1)
+    else:
+        pygame.draw.circle(surface, color, center, radius, 1)
 
 
 # =============================================================================
@@ -3017,8 +5276,7 @@ class Audio:
 class Controls:
     """Traduce ratón, teclado y mando a un Inputs por frame."""
 
-    def __init__(self, scale: int, mouse: str = "abs", sens: float = 1.0) -> None:
-        self.k = scale
+    def __init__(self, mouse: str = "abs", sens: float = 1.0) -> None:
         self.relative = mouse == "rel"
         self.sens = sens
         self.mouse_xy: tuple[float, float] | None = None
@@ -3046,7 +5304,7 @@ class Controls:
         self.commands = {
             pg.K_ESCAPE: "escape",
             pg.K_F1: "help",
-            pg.K_F2: "filter",
+            pg.K_F2: "style",
             pg.K_F3: "juice",
             pg.K_F11: "fullscreen",
             pg.K_F12: "shot",
@@ -3056,27 +5314,29 @@ class Controls:
             pg.K_m: "mute",
             pg.K_t: "mouse",
             pg.K_l: "lang",
+            pg.K_i: "ammo",
         }
         # Mando con distribución Xbox: X, A y B son izquierda, centro y derecha
         self.pad_fire = {2: 0, 4: 0, 0: 1, 3: 1, 1: 2, 5: 2}
         self.pad_start = {6, 7, 9, 10, 11}
 
-    def _mouse_at(self, pos) -> None:
+    def _mouse_at(self, pos, view) -> None:
         if not self.relative:
-            self.mouse_xy = (pos[0] / self.k, Y_MAX - pos[1] / self.k)
+            self.mouse_xy = view.to_game(pos)
             self.mouse_moved = True
 
-    def handle(self, ev, game: Game) -> str | None:
+    def handle(self, ev, game: Game, view) -> str | None:
         t = ev.type
         if t == pygame.MOUSEMOTION:
-            self._mouse_at(ev.pos)
+            self._mouse_at(ev.pos, view)
             rx, ry = ev.rel
+            unit = view.unit
             if self.relative:
-                self.rel[0] += rx / self.k * self.sens
-                self.rel[1] -= ry / self.k * self.sens
-            self.spin -= ry / self.k
+                self.rel[0] += rx / unit * self.sens
+                self.rel[1] -= ry / unit * self.sens
+            self.spin -= ry / unit
         elif t == pygame.MOUSEBUTTONDOWN and ev.button in (1, 2, 3):
-            self._mouse_at(ev.pos)
+            self._mouse_at(ev.pos, view)
             self.fire[ev.button - 1] = True
             self.start = True
         elif t == pygame.MOUSEWHEEL:
@@ -3189,23 +5449,30 @@ class ScoreStore:
         self.enabled = enabled
         self.path = path or data_dir() / "scores.json"
 
-    def load(self) -> list[tuple[str, int]] | None:
+    def load(self) -> dict[str, list[tuple[str, int]]] | None:
+        """Lee la versión 2 (una tabla por modo) y también la 1 (una sola tabla)."""
         if not self.enabled:
             return None
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
-            table = [(str(name)[:3], int(score)) for name, score in data["scores"]]
-        except (OSError, ValueError, KeyError, TypeError):
+            raw = data["tables"] if "tables" in data else {"arcade": data["scores"]}
+            tables = {
+                mode: [(str(name)[:3], int(score)) for name, score in rows][:5]
+                for mode, rows in raw.items()
+                if mode in AMMO_MODES
+            }
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
             return None
-        return table[:5] or None
+        return tables or None
 
-    def save(self, table: list[tuple[str, int]]) -> None:
+    def save(self, tables: dict[str, list[tuple[str, int]]]) -> None:
         if not self.enabled:
             return
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self.path.with_suffix(".tmp")
-            payload = {"version": 1, "scores": [list(e) for e in table]}
+            rows = {mode: [list(e) for e in table] for mode, table in tables.items()}
+            payload = {"version": 2, "tables": rows}
             tmp.write_text(json.dumps(payload, indent=1), encoding="utf-8")
             os.replace(tmp, self.path)
         except OSError as exc:
@@ -3243,12 +5510,35 @@ class SettingsStore:
             print(f"No se pudieron guardar los ajustes: {exc}", file=sys.stderr)
 
 
-def auto_scale() -> int:
+STYLES = ("hd", "retro", "arcade")
+
+
+def initial_window(scale: int = 0) -> tuple[int, int]:
+    """Ventana apaisada que cabe en el escritorio, con sitio para los paneles."""
     try:
         dw, dh = pygame.display.get_desktop_sizes()[0]
     except (pygame.error, IndexError, AttributeError):
-        return 3
-    return int(clamp(min((dh - 110) // H, (dw - 60) // W), 1, 4))
+        dw, dh = 1280, 800
+    h = H * scale if scale else int(min(dh * 0.85, 1000))
+    w = int(min(dw * 0.95, h * 1.6))
+    return max(W, w), max(H, h)
+
+
+def set_display(size: tuple[int, int], fullscreen: bool):
+    if fullscreen:
+        try:
+            return pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
+        except pygame.error:
+            pass
+    return pygame.display.set_mode(size, pygame.RESIZABLE)
+
+
+def make_renderer(style: str, effects: bool, lang: str):
+    if style == "hd":
+        return HDRenderer(effects, lang)
+    if style == "retro":
+        return PixelRenderer("crt", effects, lang)
+    return PixelRenderer("off", False, lang)
 
 
 def set_relative_mouse(on: bool) -> None:
@@ -3269,32 +5559,34 @@ def run_game(args: argparse.Namespace) -> int:
         return 1
     pygame.mixer.pre_init(22050, -16, 2, 512)
     pygame.init()
-    k = args.scale or auto_scale()
-    flags = (
-        pygame.SCALED | pygame.RESIZABLE | (pygame.FULLSCREEN if args.fullscreen else 0)
-    )
-    try:
-        screen = pygame.display.set_mode((W * k, H * k), flags)
-    except pygame.error:
-        screen = pygame.display.set_mode((W * k, H * k))
+    windowed = initial_window(args.scale)
+    fullscreen = args.fullscreen
+    screen = set_display(windowed, fullscreen)
     pygame.display.set_caption(f"missile.py {__version__}")
     pygame.display.set_icon(make_icon())
     pygame.mouse.set_visible(False)
     settings = SettingsStore(not args.no_save)
     store = ScoreStore(not args.no_save)
-    juice = False if args.classic else settings.get("effects", True)
-    fx = "off" if args.classic else args.fx or settings.get("filter", "crt")
+    if args.classic:
+        style, effects, infinite = "arcade", False, False
+    else:
+        style = args.style or settings.get("style", "hd")
+        style = style if style in STYLES else "hd"
+        effects = settings.get("effects", True)
+        infinite = (
+            args.ammo == "infinite" if args.ammo else settings.get("infinite", True)
+        )
     lang = args.lang or settings.get("lang", "auto")
     lang = detect_lang() if lang not in LANGS else lang
     mouse = args.mouse or settings.get("mouse", "abs")
     game = Game(
-        args.seed, args.cities, args.bonus, args.wave, store.load(), stats_screen=juice
+        args.seed, args.cities, args.bonus, args.wave, store.load(), effects, infinite
     )
-    renderer = Renderer(k, fx, juice, lang)
-    audio = Audio(True, juice)
+    renderer = make_renderer(style, effects, lang)
+    audio = Audio(True, effects)
     if args.mute or settings.get("muted", False):
         audio.toggle_mute()  # arranca en silencio, pero M lo devuelve
-    controls = Controls(k, mouse if mouse in ("abs", "rel") else "abs", args.sens)
+    controls = Controls(mouse if mouse in ("abs", "rel") else "abs", args.sens)
     clock = pygame.time.Clock()
     paused = help_on = relative_on = False
     running = True
@@ -3308,7 +5600,7 @@ def run_game(args: argparse.Namespace) -> int:
                 Phase.INTRO,
             ):
                 paused = True
-            cmd = controls.handle(ev, game)
+            cmd = controls.handle(ev, game, renderer)
             if cmd == "escape":
                 if help_on:
                     help_on = False
@@ -3320,23 +5612,32 @@ def run_game(args: argparse.Namespace) -> int:
                 paused = not paused
             elif cmd == "help":
                 help_on = not help_on
-            elif cmd == "filter":
-                renderer.cycle_filter()
-                settings.set(filter=renderer.fx_mode)
+            elif cmd == "style":
+                style = STYLES[(STYLES.index(style) + 1) % len(STYLES)]
+                renderer = make_renderer(style, effects, renderer.lang)
+                renderer.say(f"style_{style}")
+                settings.set(style=style)
             elif cmd == "juice":
-                renderer.set_juice(not renderer.juice)
-                audio.juice = game.stats_screen = renderer.juice
-                settings.set(effects=renderer.juice)
+                effects = not effects
+                renderer.set_juice(effects)
+                audio.juice = game.stats_screen = effects
+                settings.set(effects=effects)
+            elif cmd == "ammo" and game.attract:
+                game.set_infinite(not game.infinite)
+                renderer.say("inf_on" if game.infinite else "inf_off")
+                settings.set(infinite=game.infinite)
             elif cmd == "lang":
                 renderer.toggle_lang()
                 settings.set(lang=renderer.lang)
             elif cmd == "fullscreen":
-                try:
-                    pygame.display.toggle_fullscreen()
-                except pygame.error:
-                    pass
+                fullscreen = not fullscreen
+                screen = set_display(windowed, fullscreen)
             elif cmd == "shot":
-                name = f"missile-{time.strftime('%Y%m%d-%H%M%S')}.png"
+                stamp, n = time.strftime("%Y%m%d-%H%M%S"), 1
+                name = f"missile-{stamp}.png"
+                while os.path.exists(name):  # dos capturas en el mismo segundo
+                    n += 1
+                    name = f"missile-{stamp}-{n}.png"
                 pygame.image.save(screen, name)
                 renderer.say("shot")
             elif cmd == "mute":
@@ -3347,6 +5648,9 @@ def run_game(args: argparse.Namespace) -> int:
                 controls.relative = not controls.relative
                 renderer.say("trackball" if controls.relative else "mouse")
                 settings.set(mouse="rel" if controls.relative else "abs")
+        screen = pygame.display.get_surface()
+        if not fullscreen:
+            windowed = screen.get_size()
         frozen = paused or help_on
         inp = controls.build(game)
         if not frozen:
@@ -3361,11 +5665,10 @@ def run_game(args: argparse.Namespace) -> int:
         if want_relative != relative_on:
             set_relative_mouse(want_relative)
             relative_on = want_relative
-        renderer.draw(game, "help" if help_on else "pause" if paused else None)
-        renderer.present(screen)
+        renderer.draw(game, screen, "help" if help_on else "pause" if paused else None)
         pygame.display.flip()
         if game.scores_changed:
-            store.save(game.high_scores)
+            store.save(game.tables)
             game.scores_changed = False
         clock.tick(FPS)
     pygame.quit()
@@ -3397,13 +5700,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--classic",
         action="store_true",
-        help="recreativa pura: sin filtro, efectos ni estadísticas",
+        help="recreativa pura: píxeles, munición limitada, sin efectos ni estadísticas",
     )
     p.add_argument(
-        "--fx",
-        choices=Renderer.FILTERS,
+        "--style",
+        choices=STYLES,
         default=None,
-        help="filtro de imagen: crt, glow u off (F2 lo cambia)",
+        help="gráficos: hd, retro o arcade (F2 los alterna)",
+    )
+    p.add_argument(
+        "--ammo",
+        choices=("infinite", "limited"),
+        default=None,
+        help="munición infinita o la del original (I la alterna en el menú)",
     )
     p.add_argument(
         "--mouse", choices=("abs", "rel"), default=None,
@@ -3424,7 +5733,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=0,
         choices=range(9),
         metavar="N",
-        help="escala de la ventana; 0 la elige sola",
+        help="altura inicial de la ventana en múltiplos de 231 píxeles; 0 la elige sola",
     )
     p.add_argument(
         "--fullscreen", action="store_true", help="pantalla completa (F11 la alterna)"
