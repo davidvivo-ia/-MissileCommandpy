@@ -1,409 +1,231 @@
 # missile.py
 
-**Missile Command** (Atari, 1980, Dave Theurer) recreado en Python moderno y en **un único archivo: `missile.py`**.
+**Missile Command** (Atari, 1980, Dave Theurer) recreado en Python, en **un solo archivo: `missile.py`**.
 
-No hay paquetes, ni módulos auxiliares, ni carpeta de assets. Los gráficos se dibujan en tiempo real y el sonido se sintetiza en el propio código. Las tablas de juego salen del fuente original de Atari. Se juega con `python missile.py`.
+El núcleo es la recreativa: sus reglas y sus tablas están traducidas rutina a rutina del código fuente original de Atari. Encima va una capa de mejoras que se apaga con `--classic`: imagen de tubo con brillo, partículas, humo, temblor de cámara, sonido estéreo, mando, estadísticas, récords que se guardan y el juego en español.
 
-> **Estado:** especificación. `missile.py` aún no existe; este README es el contrato que debe cumplir.
+```bash
+pip install pygame-ce
+python missile.py
+```
 
----
-
-## 1. De dónde salen los números
-
-Este README no está escrito de memoria. Cada valor lleva una etiqueta con su procedencia:
-
-| Etiqueta | Fuente | Qué se ha sacado de ella |
-|---|---|---|
-| `W3COMN` | [historicalsource/missile-command](https://github.com/historicalsource/missile-command), archivo `W3COMN.XX` | Constantes globales del fuente rev. 1: posiciones de ciudades y silos, límites del cursor, ventana de MIRV, diámetro de explosión. |
-| `W3MAIN` | El mismo repositorio, archivo `A35820.1D` | Lógica de juego: tablas por oleada, radios de explosión, colisión, puntuación, selección de objetivos. |
-| `McFadden` | [6502disassembly.com](https://6502disassembly.com/va-missile-command/), de Andy McFadden (2021) | Desensamblado comentado de la rev. 3: guía de oleadas, paleta, mensajes, sonido, límites. |
-| **Diseño** | — | Decisión propia de `missile.py` allí donde el original depende del hardware. |
-
-El fuente original está en ensamblador 6502 con `.RADIX 16`. Los números sin punto son hexadecimales (`5F` = 95) y los que llevan punto son decimales (`10.` = 10). Todas las cifras de este README ya están convertidas a decimal.
-
-Si la rev. 1 (el fuente) y la rev. 3 (el desensamblado) no coinciden, manda la rev. 3, que es la versión final de Atari.
-
-Referencias consultadas sin sacar cifras de ellas: el driver de MAME [`missile.cpp`](https://github.com/mamedev/mame/blob/master/src/mame/atari/missile.cpp), el core FPGA de [MiSTer](https://github.com/MiSTer-devel/Arcade-MissileCommand_MiSTer) y el [Missile de Robert Munafo](https://www.mrob.com/pub/source/missile.html) para Mac (1984).
+No hay más archivos. Los gráficos se dibujan píxel a píxel y el sonido se sintetiza al arrancar.
 
 ---
 
-## 2. Requisitos y arranque
+## 1. Requisitos
 
-- **Python 3.12 o superior.** Verificado con Python 3.13 y pygame-ce 2.5.8.
-- **pygame-ce** es la única dependencia. NumPy no hace falta: el audio se sintetiza con el módulo `array` de la biblioteca estándar.
+- **Python 3.10 o superior.** Probado con Python 3.13 y pygame-ce 2.5.8.
+- **pygame-ce** para jugar. No hace falta nada más: ni NumPy ni archivos de sonido o imagen.
+- Sin pygame funcionan igual `--test` y `--headless`, que solo usan la biblioteca estándar.
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install pygame-ce
-python missile.py
+python missile.py                # o ./missile.py en Linux y macOS
 ```
 
-Opciones de línea de comandos:
+---
+
+## 2. Cómo se juega
+
+Caen misiles balísticos (ICBM) sobre seis ciudades. Tienes tres silos con 10 antimisiles (ABM) cada uno. Cada ABM vuela hasta la mira y explota; la explosión destruye todo atacante que toque, y cada atacante destruido explota a su vez, así que las reacciones en cadena son la clave. El silo central dispara más rápido que los laterales. Si una oleada termina sin ciudades en pie ni ciudades extra en reserva, se acaba la partida.
+
+### Controles
+
+| Acción | Ratón | Teclado | Mando |
+|---|---|---|---|
+| Apuntar | mover | flechas; Mayús para afinar | stick izquierdo o cruceta |
+| Disparar desde el silo izquierdo, central o derecho | botón izquierdo, central o derecho | `Z` `X` `C` (o `A` `S` `D`) | `X` `A` `B` (o `LB` `Y` `RB`) |
+| Empezar a uno o a dos jugadores | clic | `Enter` o `1`; `2` para dos | `A` o `Start` |
+| Pausa | — | `P` o `Esc`; `Esc` en pausa sale | `Start` |
+| Ayuda en pantalla | — | `F1` | — |
+| Filtro: CRT, solo brillo o ninguno | — | `F2` | — |
+| Efectos sí o no | — | `F3` | — |
+| Pantalla completa | — | `F11` | — |
+| Captura de pantalla | — | `F12` | — |
+| Sonido sí o no | — | `M` | — |
+| Ratón normal o trackball | — | `T` | — |
+| Inglés o español | — | `L` | — |
+
+- **Ratón normal:** la mira sigue al puntero. Es lo más cómodo en un escritorio.
+- **Modo trackball:** el ratón mueve la mira por desplazamiento, como el control original; `--sens` ajusta la velocidad.
+- **El juego se pausa solo** si la ventana pierde el foco en plena oleada.
+- **Iniciales:** se escriben con el teclado o se eligen moviendo el ratón, la rueda o las flechas.
+
+---
+
+## 3. Opciones de línea de comandos
 
 | Opción | Efecto | Por defecto |
 |---|---|---|
-| `--cities N` | Ciudades iniciales, de 4 a 7, como el DIP switch del original. | 6 |
-| `--bonus N` | Puntos por ciudad bonus: 8000, 10000, 12000, 14000, 15000, 18000 o 20000 (`W3MAIN BONINL`). `0` las desactiva, que es el modo torneo. | 10000 |
-| `--seed N` | Semilla del generador aleatorio. Misma semilla, misma partida. | aleatoria |
-| `--sens F` | Sensibilidad del ratón usado como trackball. | 1.0 |
-| `--headless` | Simula sin ventana, con el piloto automático, y vuelca la puntuación final. | — |
-| `--test` | Ejecuta las comprobaciones internas y sale. | — |
+| `--cities N` | Ciudades iniciales, de 4 a 7, como el DIP del original. Con 7, una queda en reserva. | 6 |
+| `--bonus N` | Puntos por ciudad extra: 8000, 10000, 12000, 14000, 15000, 18000 o 20000. `0` las desactiva (modo torneo). | 10000 |
+| `--wave N` | Oleada inicial, para entrenar las difíciles. | 1 |
+| `--seed N` | Semilla: con las mismas acciones, la misma partida. | aleatoria |
+| `--classic` | Recreativa pura: colores del hardware, sin filtro, efectos ni estadísticas. | — |
+| `--fx crt\|glow\|off` | Filtro de imagen. | `crt` |
+| `--mouse abs\|rel` | Ratón normal o trackball. | `abs` |
+| `--lang en\|es` | Idioma de los textos. | el del sistema |
+| `--sens F` | Sensibilidad del modo trackball. | 1.0 |
+| `--scale N` | Escala de la ventana; `0` la elige según el monitor. | 0 |
+| `--fullscreen` | Arranca a pantalla completa. | — |
+| `--mute` | Arranca sin sonido. | — |
+| `--no-save` | No lee ni escribe récords ni ajustes. | — |
+| `--headless` | Simula una partida con el piloto automático, sin ventana, e imprime el resultado. | — |
+| `--frames N` | Límite de frames para `--headless`. | 324000 |
+| `--test` | Ejecuta las comprobaciones internas. | — |
+
+Lo que eliges con `F2`, `F3`, `T`, `M` y `L` se guarda para la próxima vez; una opción en la línea de comandos manda sobre lo guardado.
 
 ---
 
-## 3. Reglas del archivo único
+## 4. Lo que añade a la recreativa
 
-1. **Un archivo: `missile.py`.** Ni `assets/`, ni `config.json`, ni `utils.py`.
-2. **Cero recursos externos.** La tipografía, las ciudades, las explosiones y el sonido se generan por código.
-3. **Un solo dueño del estado.** Una instancia de `Game` lo guarda todo. No hay globales mutables.
-4. **Lógica sin pygame.** `update()` no toca pygame, así que se puede probar sin ventana.
-5. **Determinismo.** `Game` tiene su propio `random.Random(seed)`. Nunca se usa el `random` global.
-6. **Orden fijo dentro del archivo:**
-   1. docstring y licencia
-   2. imports
-   3. constantes y tablas del original
-   4. entidades (`@dataclass(slots=True)`)
-   5. lógica pura
-   6. piloto automático
-   7. render
-   8. audio
-   9. bucle principal, argumentos y `main()`
-7. **Techo orientativo de 1.500 líneas.** Pasarse suele ser señal de abstracción sobrante.
-8. **Estilo:** `ruff check missile.py` y `ruff format --check missile.py` pasan limpios.
+Nada de esto cambia las reglas ni la puntuación. `--classic` o `F3` lo apagan.
+
+- **Imagen de tubo:** brillo alrededor de explosiones, cabezas de misil y textos; líneas de barrido, rejilla de fósforo y viñeta. `F2` alterna CRT, solo brillo y nada.
+- **Paleta de fósforo:** los ocho colores del hardware, con el tono de un tubo. `--classic` vuelve a los colores puros.
+- **Explosiones más vivas:** el radio crece de forma continua en pantalla, con núcleo incandescente y onda expansiva. La colisión sigue el calendario exacto del original.
+- **Partículas:** chispas en cada derribo, escombros que rebotan en el suelo al caer una ciudad o un silo, ascuas y humo que sale de las ruinas.
+- **Temblor y destello:** la pantalla tiembla y se ilumina con los impactos; mucho más con «THE END».
+- **Puntos flotantes y cadenas:** cada derribo muestra sus puntos. Desde dos derribos encadenados suena un tono que sube, y desde tres aparece «CHAIN n».
+- **Título que se desintegra:** un bombardeo barre «MISSILE COMMAND» y se come las letras, como el arranque de la recreativa.
+- **Cielo estrellado** en las oleadas de fondo negro.
+- **Informe de misión** al acabar: oleadas superadas, derribos por tipo, mejor cadena, ciudades perdidas, derribos por ABM y tiempo.
+- **Récords y ajustes que se guardan** (sección 8).
+- **Sonido estéreo:** cada efecto suena a la izquierda o a la derecha según dónde ocurre.
+- **Mando, ratón normal, pausa automática, capturas y textos en español.**
+
+### Dos jugadores
+
+La recreativa admitía dos jugadores por turnos y aquí también está: se empieza con la tecla `2`. Cada jugador conserva sus ciudades, su puntuación y sus ciudades extra. Juegan la misma oleada uno detrás de otro: jugador 1 oleada 1, jugador 2 oleada 1, jugador 1 oleada 2. Cuando uno se queda sin ciudades, el otro sigue solo. Al final cada uno ve su informe y, si entra en la tabla, escribe sus iniciales.
 
 ---
 
-## 4. Pantalla, coordenadas y tiempo
+## 5. Fidelidad al original
 
-| Parámetro | Valor | Fuente |
+### De dónde salen los números
+
+| Etiqueta | Fuente | Qué se ha sacado |
 |---|---|---|
-| Resolución lógica | 256 × 231 | McFadden |
-| Eje vertical | línea 0 abajo, línea 230 arriba | McFadden |
-| Ritmo de la lógica | 60 frames por segundo; todas las tablas cuentan en frames | McFadden |
-| Techo de juego (`TOPSCR`) | 222 | W3COMN |
-| Cursor, eje horizontal | de 8 a 247 | W3COMN `IHMIN`, `IHMAX` |
-| Cursor, eje vertical | de 45 a 206 | W3COMN `IVMIN`, `IVMAX` |
-| Línea sin daño (`LOWEST`) | 33 | W3COMN |
+| `W3COMN` | [historicalsource/missile-command](https://github.com/historicalsource/missile-command), archivo `W3COMN.XX` | Constantes del fuente rev. 1: ciudades, silos, límites del cursor, ventana de MIRV, diámetro de explosión. |
+| `W3MAIN` | El mismo repositorio, archivo `A35820.1D` | Lógica: lanzamientos, objetivos, MIRV, voladores, smart bombs, explosiones, colisión, recuento y ciudades extra. |
+| rev. 3 | [Listado desensamblado de 6502disassembly.com](https://6502disassembly.com/va-missile-command/MissileCommand.html), de Andy McFadden | Tablas finales de oleadas y colores, y comprobación de cada rutina en la última versión de Atari. |
+| McFadden | [Su guía del juego](https://6502disassembly.com/va-missile-command/) | Contexto y comportamiento descrito; cuando contradice al código, manda el código. |
 
-**Diseño.** La lógica trabaja en las coordenadas del original, con la y hacia arriba, para copiar las constantes tal cual. Solo el render convierte, con `pantalla_y = 230 - y`.
+El fuente usa `.RADIX 16`: los números sin punto son hexadecimales (`5F` = 95) y los que llevan punto son decimales (`10.` = 10). Si la rev. 1 y la rev. 3 difieren, manda la rev. 3.
 
-**Diseño.** La ventana se abre con `pygame.display.set_mode((256, 231), pygame.SCALED)` y SDL se encarga de escalar. `F11` llama a `pygame.display.toggle_fullscreen()`.
+### Reglas que reproduce
 
-**Diseño.** Paso fijo: una llamada a `update()` por frame, con `clock.tick(60)` y sin `dt`. Si el ordenador no llega, el juego se ralentiza, como la recreativa, en lugar de saltarse frames.
+- **Pantalla:** 256 × 231 píxeles, con la y hacia arriba como el hardware, a 60 frames por segundo.
+- **ABM:** 10 por silo, 8 en vuelo como mucho y no más de 16 entre ABM y explosiones defensivas. El silo central avanza 7 pasos por frame y los laterales 3. Al quedar 3 aparece LOW, y OUT al vaciarse (`W3MAIN UPABMS`, `ABMLAU`).
+- **Explosiones:** 20 huecos en 5 grupos; cada explosión avanza un paso cada 5 frames, con radio 0, 2, 3… 13 y vuelta a 0. Son octógonos y la colisión usa la distancia aproximada del original, el mayor más 3/8 del menor, con 1 de margen para un ICBM, 3 para una smart bomb y 6 para un volador. Por debajo de la línea 33 no dañan y por encima de la 209 no se crean (`PREXPL`, `DAMAGE`, `DELTA`, `DETONA`).
+- **Reacciones en cadena:** todo atacante destruido explota y su explosión destruye a otros.
+- **ICBM:** avanzan una unidad por paso con un retardo 8.8 por oleada, que da el reparto irregular 1-2-1-2 frames del original. No salen ataques nuevos mientras el ICBM más alto esté por encima de max(202 − 2 × oleada, 180), y salen como mucho 4 por frame (`UPICBM`, `ICBLAU`, `ICNORM`).
+- **MIRV:** un ICBM a una altura de 128 a 159 puede soltar hasta 3 cabezas, cada una hacia un objetivo distinto. No ocurre con 12 o más explosiones ni en el modo de demostración (`MIRVER`).
+- **Objetivos:** nunca hay más de 3 ciudades entre destruidas y apuntadas en una oleada; después los ataques van a los silos (`GUICBM`).
+- **Smart bombs:** desde la oleada 6, como mucho 3 a la vez, y una de cada cuatro salidas mientras queden ICBM. Esquivan lo que brilla cerca sin cambiar de objetivo. Hasta la oleada 8 no pueden esquivar hacia arriba; desde la 9, sí (`CMNEWP`, constante `STUPID`).
+- **Voladores:** desde la oleada 2. El satélite avanza 1 píxel cada 2 frames y el bombardero cada 3. Disparan hasta 3 ICBM a la vez, solo entre x = 48 y x = 207 (`ACTPLA`, `PROPLA`).
+- **Final acelerado:** sin ABM, sin explosiones y con ataques en el aire, todo cae a velocidad máxima; si además han caído 3 ciudades, la oleada termina en el acto (`TALIVE`).
+- **Recuento:** un ABM cada 6 frames y después las ciudades, que se retiran en el orden desordenado del índice interno original. Las ciudades extra se calculan al cerrar la oleada y rellenan cráteres al azar (`ENDWV1` a `ENDWV5`, `REGEN`, `CHEKBO`).
+- **Puntuación:** 25 por ICBM, 100 por volador, 125 por smart bomb, 5 por ABM sin disparar y 100 por ciudad en pie, por un multiplicador de ×1 a ×6.
+- **Colores:** los 10 juegos de la tabla `$694e`, decodificados byte a byte; cambian cada 2 oleadas.
+- **Piloto de demostración:** ataca los ICBM por orden de aparición, apunta a donde estarán dentro de 16 frames, mueve la mira a 2 píxeles por frame y no lleva más de 2 ABM en vuelo.
+- **Las ciudades destruidas** quedan como silueta en el color del suelo, el efecto de ruina del hardware.
 
----
+### Correcciones a la guía de McFadden
 
-## 5. Escenario
+Al contrastar cada regla con el código, cuatro afirmaciones de su guía no coinciden con el propio listado de la rev. 3 ni con el fuente rev. 1. Aquí manda el código:
 
-Seis ciudades y tres silos, con las coordenadas del original (`W3COMN`) ordenadas de izquierda a derecha:
+- **Smart bombs:** la guía dice que desde la oleada 9 no esquivan hacia arriba. El código hace lo contrario: hasta la 8 no suben y desde la 9 sí.
+- **MIRV:** la guía habla de la altura máxima vista al recorrer los huecos. El registro que se compara conserva la altura del propio ICBM, así que el candidato es cualquier ICBM entre 128 y 159.
+- **Altura de los voladores:** la guía da 148 a 195 en las oleadas 2 y 3. El código da 148 a 180, 132 a 164 en las oleadas 4 y 5, y 100 a 132 después.
+- **Cadencia de disparo de los voladores:** la guía la da en frames. El contador avanza al moverse, así que son píxeles recorridos: 128, 96, 64, 48, 32, 32 y 16 según la oleada.
 
-| Objeto | x | y |
-|---|---|---|
-| Silo izquierdo | 20 | 22 |
-| Ciudad | 44 | 18 |
-| Ciudad | 71 | 17 |
-| Ciudad | 95 | 16 |
-| Silo central | 123 | 22 |
-| Ciudad | 148 | 18 |
-| Ciudad | 180 | 21 |
-| Ciudad | 208 | 17 |
-| Silo derecho | 240 | 22 |
-
-Los ABM salen dos líneas por encima de su silo, en y = 24 (`W3MAIN MBCPVA`). El terreno y las ciudades ocupan las 32 líneas inferiores, la franja que en el hardware tenía un bit de color extra (McFadden).
-
----
-
-## 6. Reglas del juego
-
-Vocabulario de McFadden: **ABM** es el misil del jugador, **ICBM** el misil enemigo, **MIRV** el ICBM que se divide y **volador** el bombardero o el satélite.
-
-### 6.1 Defensa: los ABM
-
-- **Munición.** 10 ABM por silo (`W3COMN MAXMIS`). Los silos se reparan y recargan al empezar cada oleada.
-- **Disparo.** Los botones izquierdo, central y derecho disparan desde el silo izquierdo, central y derecho. Un silo vacío o destruido no dispara y suena el aviso de "no puede disparar". El juego nunca pasa el disparo a otro silo.
-- **Límites.** Como mucho hay 8 ABM en vuelo (`W3COMN NABMS`). Además, los ABM en vuelo más las explosiones defensivas no pueden pasar de 16 (`W3COMN MAXDEX`).
-- **Destino.** Al disparar, el punto de destino se marca con una X parpadeante. El ABM detona al llegar.
-- **Velocidad.** Los silos laterales avanzan 3 pasos por frame y el central 7 (`W3MAIN UPABMS`). Cada paso es una unidad sobre la trayectoria.
-- **Avisos.** Cuando a un silo le quedan 3 ABM aparece LOW debajo de él. Cuando se queda a cero, OUT.
-
-### 6.2 Explosiones y colisiones
-
-- **Huecos.** Hay 20 explosiones simultáneas como máximo (`W3COMN NEXPLO`).
-- **Radio.** Sigue la tabla `OLDRAD` de `W3MAIN`: sube de 0 a 13 y vuelve a 0. Las cifras exactas están en la sección 7.
-- **Ritmo.** Cada explosión avanza un paso cada 5 frames. Las 20 se reparten en 5 grupos de 4 y en cada frame se actualiza un grupo (`W3MAIN PREXPL`). Una explosión dura unos 135 frames, algo más de 2 segundos.
-- **Forma.** Es un octógono, no un círculo. Para un radio r, sus vértices son (±r, 0), (0, ±r) y (±8r/11, ±8r/11). Es exactamente la figura que define la fórmula de colisión de abajo.
-- **Colisión** (`W3MAIN DELTA` y `DAMAGE`). Sean dx y dy las distancias absolutas entre la explosión y el atacante. El alcance R es el radio actual más el tamaño del blanco: 1 para un ICBM, 3 para una smart bomb y 6 para un volador. Hay impacto si se cumplen las tres condiciones:
-
-  ```
-  dx < R    y    dy < R    y    max(dx, dy) + 3/8 · min(dx, dy) < R
-  ```
-
-- **Túnel.** La colisión solo se comprueba cuando la explosión se actualiza, cada 5 frames. Un ICBM rápido puede atravesar una explosión pequeña. Se replica tal cual.
-- **Blancos.** Solo reciben daño los atacantes. Los ABM atraviesan las explosiones sin daño.
-- **Suelo.** Una explosión por debajo de la línea 33 no hace daño. Un ICBM destruido por debajo de la línea 33 no da puntos (`W3MAIN ICKILL`).
-- **Cadenas.** Todo atacante destruido detona a su vez (`W3MAIN DETONA`), y su explosión destruye a otros. Las reacciones en cadena son parte del juego.
-- **Techo.** No se crean explosiones por encima de la línea 209 (`W3MAIN DETONA`).
-
-### 6.3 ICBM y MIRV
-
-- **Huecos.** Hay 8 huecos compartidos por ICBM y smart bombs (`W3COMN NICBMS`).
-- **Origen y objetivo.** Los ICBM entran por arriba o los suelta un volador. Cada uno apunta a una ciudad o a un silo que sigan en pie.
-- **Movimiento.** Avanzan en línea recta, una unidad por paso. El ritmo de pasos depende de la oleada: es el retardo en frames de la sección 7, guardado en punto fijo 8.8. Se reproduce con un acumulador, que da el reparto irregular del original (con 1,5 frames de retardo, espera 1, luego 2, luego 1...):
-
-  ```python
-  acc += 0x100                    # en cada frame
-  if acc > delay_8_8:
-      acc -= delay_8_8 + 0x100
-      mover_todos_los_icbm_un_paso()
-  ```
-
-- **Llegada.** El ICBM llega cuando sobrepasa su objetivo en x o en y. No hace falta que coincida al píxel (McFadden).
-- **Ritmo de ataque.** No sale ningún ataque nuevo mientras el ICBM más alto esté por encima de `max(202 - 2 × oleada, 180)` (`W3COMN LAUHGT`, `LAULOW`). En un mismo frame salen como mucho 4 (McFadden).
-- **MIRV** (`W3COMN MIRVLO`, `MIRVHI`, `MIRVWV`). Puede ocurrir desde la oleada 1. Se recorren los 8 huecos en orden, llevando la altura máxima vista hasta el momento. Un ICBM es candidato si se cumplen tres cosas:
-  1. esa altura máxima está entre 128 y 159;
-  2. el propio candidato está por debajo de 160;
-  3. quedan huecos libres e ICBM sin gastar en la oleada.
-
-  Un ICBM puede soltar hasta 3 cabezas nuevas, cada una hacia un objetivo distinto. Todas cuentan para el total de la oleada.
-- **Impacto.** Una ciudad alcanzada queda destruida. Un silo alcanzado queda destruido y pierde todos sus ABM (`W3MAIN DESTROY`).
-
-### 6.4 Smart bombs
-
-- **Aparición.** Desde la oleada 6. El número por oleada está en la sección 7.
-- **Límites.** Comparten huecos y velocidad con los ICBM. Hay 3 en pantalla como máximo.
-- **Lanzamiento** (`W3MAIN ICBLAU`). Solo sale una smart bomb si hay menos de 3 en pantalla y la suma de smart bombs e ICBM en pantalla es menor que 5. Mientras queden ICBM por lanzar, cada lanzamiento tiene una probabilidad de 1 entre 4 de ser una smart bomb. Cuando ya no quedan ICBM, solo salen smart bombs.
-- **Movimiento.** Se mueven como un ICBM mientras no haya peligro cerca. Ante una amenaza, se apartan sin acercarse a ella y sin dejar de ir hacia su objetivo. Nunca cambian de objetivo.
-- **Oleada 9.** Desde la oleada 9 ya no pueden esquivar hacia arriba. El fuente lo llama `STUPID`, con el comentario "MAKE IT STUPID (NO UP)".
-- **Diseño.** El original detecta el peligro leyendo los píxeles del color parpadeante: explosiones, marcas X y cabezas de misil. `missile.py` lo aproxima buscando esos objetos dentro de un radio. Después elige, de las 8 direcciones posibles, la que avanza hacia el objetivo sin acercarse a la amenaza más próxima.
-
-### 6.5 Voladores: bombarderos y satélites
-
-- **Aparición.** Desde la oleada 2 (`W3COMN SPUTWV`). Hay un único hueco de volador.
-- **Movimiento.** El tipo, la altura y el sentido se eligen al azar. Un bombardero avanza 1 píxel cada 3 frames y un satélite, 1 píxel cada 2 (McFadden).
-- **Disparo.** Disparan ICBM desde su posición, a veces varios a la vez, siempre dentro de los límites de la oleada. Puede cruzar la pantalla sin disparar.
-- **Tiempos.** La altura, la pausa antes de reaparecer y el intervalo entre disparos dependen de la oleada (sección 7).
-
-### 6.6 Selección de objetivos
-
-- **Tope de ciudades** (`W3MAIN GUICBM`). En una oleada nunca hay más de 3 ciudades entre destruidas y apuntadas. Si ya han caído 2, los misiles restantes solo apuntan a una ciudad a la vez.
-- **Rendición.** Si los tres silos se quedan sin ABM y ya han caído 3 ciudades, la oleada termina en el acto (`W3MAIN TALIVE`).
-
-### 6.7 Fin de oleada, ciudades bonus y fin de partida
-
-- **Final.** La oleada termina cuando se han lanzado y resuelto todos sus ICBM y smart bombs.
-- **Recuento.** Es animado: 5 puntos por ABM sin disparar y 100 por ciudad en pie, por el multiplicador.
-- **Ciudades bonus.** Se gana una cada `--bonus` puntos. Pueden ganarse varias en una oleada y la reserva no tiene un límite práctico. Al empezar la oleada se rellenan los cráteres con la reserva, y el cráter se elige al azar (McFadden).
-- **Fin de partida.** Llega al cerrar una oleada sin ciudades en pie ni en reserva. "THE END" aparece ampliado, a escala 3×10, dentro de una gran explosión.
-- **Récords.** Tabla de 5 puntuaciones con 3 iniciales, como el original. **Diseño:** vive en memoria, sin archivo, como una recreativa encendida.
-
----
-
-## 7. Tablas por oleada
-
-Listas para pegar en `missile.py`. El índice 0 corresponde a la oleada 1.
+### Tablas por oleada
 
 ```python
-# Oleadas 1 a 19. De la 20 en adelante se repite la 19.            (McFadden, rev. 3)
-# La rev. 1 lanzaba 16, 18 y 20 ICBM en las oleadas 17 a 19.       (W3MAIN ICBWAV)
+# Oleadas 1 a 19; de la 20 en adelante se repite la 19 (rev. 3)
 ICBM_COUNT  = (12, 15, 18, 12, 16, 14, 17, 10, 13, 16, 19, 12, 14, 16, 18, 14, 17, 19, 22)
-SMART_COUNT = ( 0,  0,  0,  0,  0,  1,  1,  2,  3,  4,  4,  5,  5,  6,  6,  7,  7,  7,  7)  # W3MAIN CRMWAV
-
-# Retardo entre pasos de ICBM, en frames y punto fijo 8.8: 0x04D0 = 4,8125 frames.
-# De la oleada 15 en adelante vale 0: un paso por frame.            (W3MAIN WICSPH, WICSPL)
-ICBM_DELAY_8_8 = (0x04D0, 0x02E0, 0x01C0, 0x0108, 0x00A0, 0x0060, 0x0040,
-                  0x0020, 0x0010, 0x000A, 0x0006, 0x0004, 0x0002, 0x0001, 0x0000)
-
-# Voladores, oleadas 2 a 8. De la 9 en adelante se repite la 8.
-FLIER_COOLDOWN = (240, 160, 128, 128, 96, 64, 32)   # frames antes de reaparecer  (W3MAIN WSPLAU)
-FLIER_FIRE_GAP = (128,  96,  64,  48, 32, 32, 16)   # frames entre disparos       (W3MAIN WSPFIR)
-FLIER_ALTITUDE = ((148, 195), (148, 195), (132, 163), (132, 163),
-                  (100, 131), (100, 131), (100, 131))                          # (McFadden)
-
-# Radio de explosión en cada paso. La explosión acaba en el paso 27.  (W3MAIN OLDRAD, W3COMN EXDONE)
-EXPLOSION_RADIUS = (0, 0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13,
-                    13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0, 0)
-
-BONUS_CHOICES = (8000, 10000, 12000, 14000, 15000, 18000, 20000)              # (W3MAIN BONINL)
+SMART_COUNT = ( 0,  0,  0,  0,  0,  1,  1,  2,  3,  4,  4,  5,  5,  6,  6,  7,  7,  7,  7)
+# Retardo entre pasos de ICBM en frames, punto fijo 8.8: 0x04D0 = 4,8125 frames
+ICBM_DELAY  = (0x04D0, 0x02E0, 0x01C0, 0x0108, 0x00A0, 0x0060, 0x0040, 0x0020,
+               0x0010, 0x000A, 0x0006, 0x0004, 0x0002, 0x0001, 0x0000)
+# Voladores, oleadas 2 a 8; de la 9 en adelante se repite la 8
+FLIER_RECHARGE = (240, 160, 128, 128, 96, 64, 32)   # frames hasta el siguiente
+FLIER_FIRE_GAP = (128,  96,  64,  48, 32, 32, 16)   # píxeles recorridos entre disparos
 ```
 
----
+### Lo que se aproxima
 
-## 8. Puntuación
-
-| Acción | Puntos base | Fuente |
-|---|---|---|
-| ICBM destruido | 25 | McFadden |
-| Bombardero o satélite | 100, cuatro veces un ICBM | W3MAIN `SPUTKI` |
-| Smart bomb | 125, cinco veces un ICBM | W3MAIN `CMKILL` |
-| ABM sin disparar al cerrar la oleada | 5 | McFadden |
-| Ciudad en pie al cerrar la oleada | 100 | McFadden |
-
-Todo se multiplica por el multiplicador de la oleada (McFadden):
-
-| Oleadas | 1–2 | 3–4 | 5–6 | 7–8 | 9–10 | 11 o más |
-|---|---|---|---|---|---|---|
-| Multiplicador | ×1 | ×2 | ×3 | ×4 | ×5 | ×6 |
-
-En código: `multiplicador = min((oleada + 1) // 2, 6)`.
+- **La esquiva de las smart bombs:** el original lee píxeles de color parpadeante en 8 sondas alrededor de la bomba. Aquí las sondas preguntan por explosiones, marcas de destino y cabezas de misil cercanas, y eligen la salida con las mismas máscaras de 16 direcciones.
+- **El sonido:** imita el estilo del chip POKEY con ondas cuadradas y ruido, pero no lo emula.
+- **La tipografía, las ciudades, los voladores y el terreno** son diseño propio: no se ha copiado ningún gráfico de la ROM.
+- **El bombardeo del título** sigue la idea del original, con un patrón propio.
+- **Fuera de alcance:** la emulación de la ROM, el mueble cóctel, el monedero, el autotest y los fallos de la rev. 2, como el de los 810.000 puntos.
 
 ---
 
-## 9. Color
+## 6. Arquitectura de `missile.py`
 
-- **Paleta.** Son 8 colores de 3 bits RGB: blanco, amarillo, magenta, rojo, cian, verde, azul y negro.
-- **Parpadeo.** Un color recorre los 8 a 30 Hz. Lo usan las cabezas de misil, las explosiones y la X de destino. **Diseño:** cambia cada 2 frames.
-- **Ruinas.** Una explosión sobre una ciudad deja su silueta en el color del terreno, como escombros y no como un agujero (McFadden).
-- **Colores por oleada.** Hay 10 juegos y cambian cada 2 oleadas, así que la oleada 21 repite los colores de la 1 (McFadden):
+Unas 3.500 líneas en este orden:
 
-| Oleadas | Fondo | Terreno | ICBM | Ciudad 1 | ABM y cursor | Ciudad 2 |
-|---|---|---|---|---|---|---|
-| 1–2 | negro | amarillo | rojo | cian | azul | azul |
-| 3–4 | negro | amarillo | verde | cian | azul | azul |
-| 5–6 | negro | azul | rojo | amarillo | verde | verde |
-| 7–8 | negro | rojo | amarillo | amarillo | azul | azul |
-| 9–10 | azul | amarillo | rojo | magenta | negro | negro |
-| 11–12 | cian | amarillo | rojo | negro | azul | azul |
-| 13–14 | magenta | verde | negro | negro | amarillo | amarillo |
-| 15–16 | amarillo | verde | negro | blanco | rojo | rojo |
-| 17–18 | blanco | rojo | magenta | amarillo | verde | verde |
-| 19–20 | rojo | amarillo | negro | verde | azul | azul |
+1. **Tablas del original:** constantes, oleadas, colores, tipografía y sprites como texto.
+2. **Entidades:** `Missile`, `Explosion`, `Flier`, `City`, `Silo`, `Player` y `Stats`, todas `dataclass` con `slots`.
+3. **Lógica:** la clase `Game`, una máquina de fases. No importa pygame. Cada rutina de juego del original tiene su método, con el nombre de la rutina en el comentario.
+4. **Piloto automático:** el fiel para la demostración y uno hábil para las simulaciones.
+5. **Simulación y comprobaciones:** `--headless` y `--test`.
+6. **Textos:** inglés y español.
+7. **Render:** dibuja a 256 × 231 y compone a la escala de la ventana con brillo, máscara CRT, temblor y destello.
+8. **Sonido:** síntesis en Python puro, cargada en `pygame.mixer.Sound(buffer=…)`, con paneo estéreo.
+9. **Controles, récords, ajustes y bucle principal.**
+
+La lógica no conoce a quien la escucha: cada frame deja una lista de sucesos (`FX`) que el render convierte en partículas y el sonido en efectos. Por eso la misma partida corre con ventana, sin ventana o dentro de las pruebas.
+
+El bucle va a paso fijo de 60 Hz, sin `dt`, porque todas las tablas del original cuentan frames. Si el ordenador no llega, el juego se ralentiza como la recreativa en vez de saltarse frames. Con filtro CRT a escala 4, dibujar un frame cuesta unos 5 ms.
 
 ---
 
-## 10. Texto
+## 7. Pruebas
 
-- **Rejilla.** Glifos de 8 × 8 píxeles con una línea libre arriba y otra a la derecha. Caben 32 columnas por 28 filas (McFadden).
-- **Diseño.** La fuente es un diccionario dentro de `missile.py`: cada carácter son 7 filas de 7 bits. Solo se definen los caracteres necesarios: A–Z, 0–9 y algunos signos. No se usa `pygame.font`.
-- **Mensajes.** `PLAYER`, `BONUS POINTS`, `BONUS CITY`, `LOW`, `OUT`, `GAME OVER`, `THE END`, `GREAT SCORE`, `ENTER YOUR INITIALS` y el título `MISSILE COMMAND` a escala 4×4. `DEFEND CITIES` solo aparece en las oleadas 1 a 3.
-
----
-
-## 11. Sonido
-
-El original usa el chip POKEY, con 4 canales. Tiene 8 efectos de evento y 2 continuos (McFadden):
-
-- **Silo con poca munición**, al aparecer LOW.
-- **Explosión.**
-- **Lanzamiento de ABM.**
-- **Puntos de bonus**, en el recuento.
-- **Inicio de oleada.**
-- **Fin de partida.**
-- **Ciudad bonus**, una serie de tonos aleatorios al colocarla.
-- **No puede disparar.**
-- **Volador en pantalla**, continuo.
-- **Smart bomb en pantalla**, continuo. Si coinciden con un volador, solo suena la smart bomb.
-
-**Diseño.** Síntesis en Python puro: se generan las muestras con `array('h')` y se cargan con `pygame.mixer.Sound(buffer=...)`, a 22 050 Hz y en mono, al arrancar. Está comprobado con pygame-ce 2.5.8. Si el mezclador no arranca, el juego sigue sin sonido.
-
----
-
-## 12. Piloto automático
-
-En modo attract el ordenador juega la oleada 1 (McFadden). `--headless` usa el mismo piloto.
-
-- Ataca los ICBM por orden de aparición.
-- Mueve el cursor hacia el punto donde estará el misil dentro de 16 frames, a 2 píxeles por frame (`W3COMN AUTSPD`).
-- Dispara desde el silo más cercano.
-- Nunca tiene más de 2 ABM en vuelo.
-
----
-
-## 13. Arquitectura interna
-
-### Entidades
-
-Todas son `@dataclass(slots=True)`:
-
-```python
-City(x: int, y: int, alive: bool)
-Silo(x: int, y: int, abms: int, alive: bool)
-Abm(x: float, y: float, tx: int, ty: int, vx: float, vy: float, steps_per_frame: int)
-Icbm(x: float, y: float, tx: int, ty: int, vx: float, vy: float, trail_from: tuple[int, int], smart: bool)
-Flier(kind: Literal["bomber", "satellite"], x: float, y: int, direction: int, fire_timer: int)
-Explosion(x: int, y: int, step: int, offensive: bool)
+```bash
+python missile.py --test                 # 18 comprobaciones de las reglas
+python missile.py --headless --seed 3    # una partida completa sin ventana
+ruff check missile.py && ruff format --check missile.py
 ```
 
-### Estado
+`--test` comprueba, sin necesitar pygame:
 
-```python
-class State(Enum):
-    ATTRACT = auto()
-    WAVE_START = auto()
-    PLAYING = auto()
-    WAVE_END = auto()
-    GAME_OVER = auto()
-    ENTER_INITIALS = auto()
-```
-
-`Game` guarda el estado actual, la oleada, la puntuación, la reserva de ciudades bonus, el próximo umbral de bonus, las listas de entidades, el contador de explosiones, el acumulador de retardo de los ICBM, el cursor y el `random.Random`. La pausa es un indicador aparte, no un estado.
-
-### Bucle
-
-```python
-def update(game: Game, inp: Inputs) -> None: ...                       # lógica pura, sin pygame
-def render(game: Game, screen: pygame.Surface, frame: int) -> None: ...  # solo dibujo
-def play_sounds(game: Game, bank: SoundBank) -> None: ...              # solo audio
-```
-
-`update()` no reproduce sonidos: añade eventos a `game.sound_events` y `play_sounds()` los consume. Así la lógica queda libre de pygame.
+- las tablas completas y el multiplicador;
+- la colisión octogonal y el reloj 8.8 de los ICBM;
+- que, para el mismo recorrido, el ABM central tarda 15 frames y los laterales 34;
+- que una explosión dura unos 135 frames;
+- el tope de 3 ciudades por oleada y que las smart bombs no suben antes de la oleada 9;
+- la puntuación, las ciudades extra, el determinismo con semilla y partidas completas sin errores;
+- que en oleadas altas aparecen smart bombs y voladores y que los MIRV se dividen;
+- que todos los textos, también en español, tienen glifos y caben en pantalla;
+- los turnos alternos a dos jugadores y la lectura y escritura de récords y ajustes.
 
 ---
 
-## 14. Controles
+## 8. Datos que guarda
 
-| Acción | Ratón | Teclado |
-|---|---|---|
-| Mover el cursor | movimiento relativo, como un trackball | flechas, 3 píxeles por frame |
-| Disparar desde el silo izquierdo, central o derecho | botón izquierdo, central o derecho | `Z`, `X`, `C` |
-| Empezar partida | — | `Enter` o `1` |
-| Pausa | — | `P` |
-| Pantalla completa | — | `F11` |
-| Salir | — | `Esc` |
+Los récords (`scores.json`) y los ajustes (`settings.json`) se guardan fuera del repositorio, en la carpeta de datos del usuario:
 
-**Diseño.** El ratón funciona en modo relativo con `pygame.mouse.set_relative_mode(True)`, presente en pygame-ce 2.5.8, la versión verificada. El teclado existe porque muchos touchpads no tienen botón central.
+| Sistema | Carpeta |
+|---|---|
+| Linux | `~/.local/share/missile-py/` (o `$XDG_DATA_HOME/missile-py/`) |
+| macOS | `~/Library/Application Support/missile-py/` |
+| Windows | `%APPDATA%\missile-py\` |
 
----
-
-## 15. Comprobaciones de `--test`
-
-- Las tablas tienen la longitud correcta: 19 oleadas de ICBM y smart bombs, 15 retardos, 7 entradas de voladores y 29 radios.
-- El multiplicador vale 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6 y 6 en las oleadas 1 a 12.
-- Colisión: con radio 13 y un ICBM, un blanco en (13, 0) está dentro y uno en (14, 0) está fuera.
-- Con una semilla fija, ninguna oleada pierde más de 3 ciudades.
-- Determinismo: dos simulaciones `--headless` con la misma semilla dan la misma puntuación.
+Se escriben de forma atómica, y si el archivo falta o está dañado el juego arranca con los valores por defecto. `--no-save` no toca nada. Las capturas de `F12` se guardan en la carpeta desde la que se lanza el juego.
 
 ---
 
-## 16. Plan de implementación
+## 9. Licencia
 
-Cada hito es un commit, y el juego debe arrancar en todos ellos.
+El código se publica bajo licencia **MIT**: ver [`LICENSE`](LICENSE).
 
-1. Ventana escalada, bucle a 60 Hz y cursor con sus límites.
-2. Terreno, ciudades y silos. ABM con su X de destino y explosiones octogonales.
-3. ICBM con estela, tabla de oleadas, colisión cada 5 frames, reacciones en cadena e impactos.
-4. Puntuación, multiplicador, recuento de fin de oleada y avisos LOW y OUT.
-5. MIRV y ritmo de lanzamiento.
-6. Bombarderos y satélites.
-7. Smart bombs con esquiva.
-8. Ciudades bonus, fin de partida, récords y modo attract.
-9. Colores por oleada, parpadeo y sonido.
-10. `--headless`, `--test`, `--seed` y ruff limpio.
-
----
-
-## 17. Fuera de alcance
-
-- **Emular la ROM.** `missile.py` reimplementa las reglas; no ejecuta código 6502.
-- **Funciones de la máquina.** Mueble cóctel, partida a dos jugadores, monedero y autotest.
-- **Idiomas.** El original traía inglés, español, francés y alemán. `missile.py` empieza solo en inglés.
-- **Fallos de la rev. 2.** Ni el fallo de los 810.000 puntos ni el multiplicador ×256 de las oleadas 255 y 256.
-- **Invenciones.** Ni potenciadores, ni modos nuevos, ni juego en línea.
-
----
-
-## 18. Licencia
-
-El código de este repositorio se publica bajo licencia **MIT**: ver [`LICENSE`](LICENSE).
-
-`missile.py` no copia código de Atari ni de MAME. Solo reproduce los parámetros de juego documentados aquí. El fuente original de Atari se cita como referencia de estudio y no tiene licencia libre. *Missile Command* es una marca de Atari.
+`missile.py` no copia código ni gráficos de Atari ni de MAME; reproduce las reglas y los parámetros de juego documentados aquí. El fuente original de Atari se cita como referencia de estudio y no tiene licencia libre. *Missile Command* es una marca de Atari, y este proyecto es un homenaje sin relación con la empresa.
